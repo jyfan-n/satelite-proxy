@@ -979,10 +979,7 @@ fn port_socket_snapshot(port: u16) -> String {
         match cmd.output() {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
-                let matches: Vec<&str> = text
-                    .lines()
-                    .filter(|l| l.contains(&needle))
-                    .collect();
+                let matches: Vec<&str> = text.lines().filter(|l| l.contains(&needle)).collect();
                 if matches.is_empty() {
                     "无 netstat 记录".into()
                 } else {
@@ -1349,7 +1346,8 @@ mod stale_cache_db_tests {
 
     #[test]
     fn matches_the_real_cache_file_fatal() {
-        let err = "FATAL[0001] start service: initialize cache-file: open cache.db: permission denied";
+        let err =
+            "FATAL[0001] start service: initialize cache-file: open cache.db: permission denied";
         assert!(is_stale_cache_db_error(err));
     }
 

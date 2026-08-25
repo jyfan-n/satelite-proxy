@@ -1326,7 +1326,11 @@ fn tls_to_json(tls: &TlsConfig) -> Option<Value> {
     // provide a valid fingerprint, otherwise sing-box rejects the outbound with
     // "uTLS is required by reality client".
     let fp_for_utls = if tls.reality_public_key.is_some() {
-        Some(normalized_fp.clone().unwrap_or_else(|| "chrome".to_string()))
+        Some(
+            normalized_fp
+                .clone()
+                .unwrap_or_else(|| "chrome".to_string()),
+        )
     } else {
         normalized_fp
     };
@@ -1820,7 +1824,6 @@ mod tests {
                 .to_string(),
         );
 
-        let tag = set.id.clone();
         let (_, routes, _) = build_grouped_rule_sets(&[set.clone()], &nodes, &tags);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["outbound"], tags[0]);

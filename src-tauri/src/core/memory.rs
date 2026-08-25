@@ -50,7 +50,9 @@ pub fn read_process_mem_info(pid: u32) -> ProcessMemInfo {
 
 /// Whether `pid` is currently running as root/admin (elevated). `None` when
 /// this platform's reader doesn't surface that (or the process is gone).
-#[cfg(test)]
+/// macOS-only by caller (the `self_process_is_not_root` test); other
+/// platforms' readers never set `is_root`, so there is nothing to wrap.
+#[cfg(all(test, target_os = "macos"))]
 pub fn read_process_is_root(pid: u32) -> Option<bool> {
     read_info(pid).is_root
 }
