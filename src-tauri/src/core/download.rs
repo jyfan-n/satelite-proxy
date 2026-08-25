@@ -619,6 +619,30 @@ fn extract_binary_from_tar_gz(kind: CoreKind, archive: &Path, dest: &Path) -> Ap
     Ok(())
 }
 
+/// How confidently a zip entry name matches the core binary. Exact names
+/// (historical layouts) outrank mihomo's platform-suffixed inner exe.
+fn zip_binary_match_rank(kind: CoreKind, file_name: &str) -> Option<u8> {
+    let want = kind.binary_name();
+    if file_name == want
+        || tar_binary_matches(kind, file_name)
+        || file_name
+            .strip_suffix(want.strip_suffix(".exe").unwrap_or(want))
+            .is_some()
+    {
+        return Some(2);
+    }
+    // mihomo Windows zips carry the platform-suffixed exe name
+    // (`mihomo-windows-amd64.exe`), not the plain `mihomo.exe`.
+    let stem = want.strip_suffix(".exe").unwrap_or(want);
+    if kind == CoreKind::Mihomo
+        && file_name.starts_with(&format!("{stem}-"))
+        && file_name.ends_with(".exe")
+    {
+        return Some(1);
+    }
+    None
+}
+
 /// Extract the core binary from a release zip. Xray zips additionally ship
 /// `geosite.dat` / `geoip.dat` next to the binary — stage them into `bin_dir`
 /// so `geosite:` / `geoip:` routing works after a user-initiated download
@@ -627,8 +651,7 @@ fn extract_from_zip(kind: CoreKind, archive: &Path, dest: &Path, bin_dir: &Path)
     let file = File::open(archive).map_err(|e| AppError::Core(format!("open zip: {e}")))?;
     let mut zip =
         zip::ZipArchive::new(file).map_err(|e| AppError::Core(format!("zip open: {e}")))?;
-    let want = kind.binary_name();
-    let mut target_index = None;
+    let mut target_index: Option<(usize, u8)> = None;
     let mut dat_indexes = Vec::new();
     for i in 0..zip.len() {
         let entry = zip
@@ -639,24 +662,26 @@ fn extract_from_zip(kind: CoreKind, archive: &Path, dest: &Path, bin_dir: &Path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        let stem_matches = file_name
-            .strip_suffix(want.strip_suffix(".exe").unwrap_or(want))
-            .is_some()
-            || file_name == want
-            || tar_binary_matches(kind, file_name);
-        if stem_matches {
-            target_index = Some(i);
+        if let Some(rank) = zip_binary_match_rank(kind, file_name) {
+            let better = target_index
+                .map(|(_, prev_rank)| rank >= prev_rank)
+                .unwrap_or(true);
+            if better {
+                target_index = Some((i, rank));
+            }
         } else if kind == CoreKind::Xray && (file_name == "geosite.dat" || file_name == "geoip.dat")
         {
             dat_indexes.push((i, file_name.to_string()));
         }
     }
-    let idx = target_index.ok_or_else(|| {
-        AppError::Core(format!(
-            "{} binary not found inside zip",
-            kind.display_name()
-        ))
-    })?;
+    let idx = target_index
+        .ok_or_else(|| {
+            AppError::Core(format!(
+                "{} binary not found inside zip",
+                kind.display_name()
+            ))
+        })?
+        .0;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -763,5 +788,65 @@ mod tests {
         );
         assert!(info.asset_name.starts_with("Xray-"));
         assert!(info.asset_name.ends_with(".zip"));
+    }
+
+    /// Regression: mihomo Windows zips carry a platform-suffixed inner exe
+    /// (`mihomo-windows-amd64.exe`), not the plain `mihomo.exe` — a prior
+    /// exact-name-only matcher made every in-app mihomo download fail with
+    /// "mihomo binary not found inside zip".
+    #[test]
+    fn zip_matcher_accepts_mihomo_platform_suffixed_exe() {
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::Mihomo, "mihomo-windows-amd64.exe"),
+            Some(1)
+        );
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::Mihomo, "mihomo-windows-amd64-v1.19.30.exe"),
+            Some(1)
+        );
+        // Exact names still win (rank 2).
+        assert_eq!(zip_binary_match_rank(CoreKind::Mihomo, "mihomo"), Some(2));
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::Mihomo, "mihomo.exe"),
+            Some(2)
+        );
+        assert_eq!(zip_binary_match_rank(CoreKind::Mihomo, "README.txt"), None);
+        // Prefixed match stays mihomo-only: unrelated xray/sing-box entries
+        // with dashes don't hit it.
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::Xray, "xray-windows.exe"),
+            None
+        );
+        assert_eq!(
+            zip_binary_match_rank(CoreKind::SingBox, "sing-box-windows-amd64.exe"),
+            None
+        );
+        assert_eq!(zip_binary_match_rank(CoreKind::Xray, "xray"), Some(2));
+    }
+
+    /// End-to-end over the real release artifact: extract the binary from an
+    /// actual mihomo Windows zip. `#[ignore]` — needs network like the other
+    /// live core tests; run with
+    /// `cargo test --lib core::download::tests::live_extracts_mihomo_windows_zip -- --ignored`.
+    #[test]
+    #[ignore = "live network test"]
+    fn live_extracts_mihomo_windows_zip() {
+        let bytes = std::process::Command::new("curl")
+            .args([
+                "-sSL",
+                "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-v1.19.30.zip",
+            ])
+            .output()
+            .expect("curl mihomo zip");
+        assert!(bytes.status.success(), "curl failed: {:?}", bytes.status);
+        let directory = replacement_test_dir("mihomo-zip");
+        fs::create_dir_all(&directory).unwrap();
+        let archive = directory.join("mihomo.zip");
+        fs::write(&archive, bytes.stdout).unwrap();
+        let dest = directory.join("mihomo.exe");
+        extract_from_zip(CoreKind::Mihomo, &archive, &dest, &directory)
+            .expect("extract mihomo from real zip");
+        assert!(dest.metadata().map(|m| m.len() > 1024).unwrap_or(false));
+        fs::remove_dir_all(directory).unwrap();
     }
 }
