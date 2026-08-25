@@ -256,6 +256,31 @@ pub fn remove_setuid_core_if_needed(core: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// Remove a `cache.db` left behind by a core session that ran as a
+/// different euid (typically root, under setuid TUN). The file is pure
+/// cache (fakeip mappings + rule-set cache) — safe to drop; the core
+/// rebuilds it on next start. Tries a plain remove first (covers the
+/// common case where it's just not writable, not root-owned); only prompts
+/// for admin when that fails.
+pub fn remove_stale_cache_db(cache_db: &Path) -> AppResult<()> {
+    if !cache_db.is_file() {
+        return Ok(());
+    }
+    if std::fs::remove_file(cache_db).is_ok() {
+        return Ok(());
+    }
+    let path_q = shell_single_quote(&cache_db.to_string_lossy());
+    let shell = format!("rm -f {path_q}");
+    let (code, output) = run_privileged(Path::new("/bin/sh"), &["-c", &shell])?;
+    if code != 0 || cache_db.is_file() {
+        return Err(AppError::Core(format!(
+            "无法清理旧的 cache.db: {}",
+            output.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Run `tool args` as root.
 ///
 /// Prefers `sudo` over a PTY so **Touch ID** (pam_tid) can appear; falls back to

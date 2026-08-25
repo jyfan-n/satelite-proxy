@@ -431,6 +431,9 @@ export interface ProxyStatus {
   core_memory_bytes?: number | null;
   /** Which core is active: `singbox` (default) | `xray` | `mihomo`. */
   core_type?: CoreKind | string;
+  /** True when the running core has elevated privileges (macOS: setuid-root;
+   *  Windows: UAC). */
+  core_elevated?: boolean;
 }
 
 export type RuleType =

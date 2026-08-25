@@ -5130,6 +5130,14 @@ button.check.on {
   color: var(--muted);
 }
 
+.kv-v-badge {
+  margin-left: 0.35rem;
+}
+
+.kv-v-badge.is-danger {
+  color: var(--danger);
+}
+
 .instrument-traffic {
   font-size: 1.05rem;
   font-weight: 600;
