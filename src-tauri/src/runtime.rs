@@ -7,7 +7,6 @@ use crate::config::{
     write_custom_config, BuildOptions,
 };
 use crate::core::manager::{CoreManager, CoreState};
-use crate::core::read_process_rss_bytes;
 use crate::core::resolve_core_bin;
 use crate::core::CoreKind;
 use crate::domain::{RuntimeSource, SubscriptionSource};
@@ -71,6 +70,12 @@ pub struct ProxyStatus {
     /// Which core is active: `singbox` (default) | `xray`.
     #[serde(default)]
     pub core_type: String,
+    /// True when the running core has elevated privileges (macOS:
+    /// setuid-root; Windows: UAC). Surfaced so the UI can flag it — an
+    /// elevated core outlives a normal user-privilege boundary, so it's
+    /// worth calling out rather than leaving silent.
+    #[serde(default)]
+    pub core_elevated: bool,
 }
 
 /// Cap history to limit RAM (UI only needs recent activity).
@@ -149,9 +154,12 @@ pub struct Runtime {
     custom_inbound_port: Option<u16>,
     custom_has_clash_api: bool,
     custom_has_tun: bool,
-    /// Cached (pid, value, fetched-at) from the last successful `ps`/`tasklist`
-    /// memory read — throttled since it shells out to a subprocess.
-    core_memory_cache: Option<(u32, u64, Instant)>,
+    /// Cached (pid, rss_bytes, is_root, fetched-at) from the last successful
+    /// `ps`/`tasklist` process read — throttled since it shells out to a
+    /// subprocess on macOS. `is_root` rides the same read (macOS: same `ps`
+    /// call already open for rss; other platforms: `None`, no elevation
+    /// signal there — see `core::memory`).
+    core_memory_cache: Option<(u32, u64, Option<bool>, Instant)>,
 }
 
 impl Runtime {
@@ -205,6 +213,7 @@ impl Runtime {
             self.core_started_at = Some(now_unix_secs());
         }
         let core_memory_bytes = self.core_memory_bytes();
+        let core_elevated = self.core_elevated();
         ProxyStatus {
             running: self.core.is_running(),
             core_state: self.core.state(),
@@ -273,6 +282,7 @@ impl Runtime {
             } else {
                 store.settings.core_type.clone()
             },
+            core_elevated,
         }
     }
 
@@ -286,15 +296,50 @@ impl Runtime {
     /// platforms; callers poll far more often than that, so we serve the
     /// cached value in between.
     fn core_memory_bytes(&mut self) -> Option<u64> {
+        self.core_mem_info().and_then(|i| i.rss_bytes)
+    }
+
+    /// True when the running core is currently root/admin (elevated).
+    ///
+    /// macOS: read from the live process every poll (`core::memory`'s `ps`
+    /// call, piggybacked on the RSS read below) rather than remembered from
+    /// how this app started it — setuid is a bit persisted on the binary,
+    /// so a root sing-box can predate this app session entirely (started
+    /// under old code, still running across an app restart, started
+    /// outside this app). Windows has no such history: `CoreManager`'s
+    /// `ElevatedPid` run mode is set only right after this app's own
+    /// `run_elevated` call succeeds, so remembering it is exact there.
+    fn core_elevated(&mut self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.core_mem_info()
+                .and_then(|i| i.is_root)
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.core.is_windows_elevated()
+        }
+    }
+
+    /// Cached process read (rss + root-ness) for the running core's PID,
+    /// throttled to once every 5s since it shells out to a subprocess on
+    /// macOS. `None` when no core PID is currently known.
+    fn core_mem_info(&mut self) -> Option<crate::core::ProcessMemInfo> {
         let pid = self.core.pid()?;
-        if let Some((cached_pid, bytes, at)) = self.core_memory_cache {
+        if let Some((cached_pid, bytes, is_root, at)) = self.core_memory_cache {
             if cached_pid == pid && at.elapsed() < Duration::from_secs(5) {
-                return Some(bytes);
+                return Some(crate::core::ProcessMemInfo {
+                    rss_bytes: Some(bytes),
+                    is_root,
+                });
             }
         }
-        let bytes = read_process_rss_bytes(pid)?;
-        self.core_memory_cache = Some((pid, bytes, Instant::now()));
-        Some(bytes)
+        let info = crate::core::read_process_mem_info(pid);
+        if let Some(bytes) = info.rss_bytes {
+            self.core_memory_cache = Some((pid, bytes, info.is_root, Instant::now()));
+        }
+        Some(info)
     }
 
     /// Passive health for smart switch from connection journal (no MITM / no HTTP codes).

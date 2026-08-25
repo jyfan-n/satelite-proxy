@@ -1401,7 +1401,17 @@ function coreDisplayName(kind: string | null | undefined): string {
                     {t("dashboard.coreSwitching")}
                   </>
                 ) : (
-                  (coreVersion ?? "—")
+                  <>
+                    {coreVersion ?? "—"}
+                    {proxy?.core_elevated && (
+                      <span
+                        className="kv-v-badge is-danger"
+                        title={t("dashboard.coreElevatedHint")}
+                      >
+                        {t("dashboard.coreElevated")}
+                      </span>
+                    )}
+                  </>
                 )}
               </span>
             </div>
