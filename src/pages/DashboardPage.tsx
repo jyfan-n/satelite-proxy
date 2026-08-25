@@ -23,6 +23,7 @@ import {
 } from "../api";
 import {
   useCaptureModeSwitch,
+  type CaptureMode,
 } from "../hooks/useCaptureModeSwitch";
 import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import { isZoomSettling } from "../hooks/viewportScale";
@@ -62,6 +63,21 @@ function highlightPreviewLine(line: string, query: string): ReactNode {
     parts.push(<mark key={at}>{line.slice(at, at + query.length)}</mark>);
     from = at + query.length;
   }
+}
+
+/**
+ * Detects the backend's fixed-text TUN-permission hint (see
+ * `map_tun_permission_hint` in `core/manager.rs`) so the error modal can
+ * offer a one-click "reauthorize and retry" action instead of leaving the
+ * user to guess which switch fixes a setuid/UAC failure. Matches on the
+ * hint's own anchor phrases — not on generic "permission denied" — since
+ * those phrases are appended only for this exact failure class.
+ */
+function isTunPermissionError(msg: string): boolean {
+  return (
+    msg.includes("TUN 需要更高权限才能创建虚拟网卡") ||
+    msg.includes("TUN 模式需要管理员权限以创建虚拟网卡")
+  );
 }
 
 interface Props {
@@ -188,6 +204,17 @@ export function DashboardPage({
   const [statusReady, setStatusReady] = useState(false);
   const [detailsReady, setDetailsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Retry action for the `error` modal — e.g. re-running a TUN toggle after
+   *  a permission prompt (setuid / UAC) so the user doesn't have to guess
+   *  which switch to flip. Keyed to the exact message it was computed for:
+   *  `error` is set from ~15 call sites and most don't know about this
+   *  action, so keying (rather than clearing it at each of those sites)
+   *  is what keeps a stale action from surviving onto an unrelated error. */
+  const [errorAction, setErrorAction] = useState<{
+    forMessage: string;
+    label: string;
+    onClick: () => void;
+  } | null>(null);
   /** Core failure text to surface in the error modal (dead core, not running).
    *  Remembered dismissal keeps the same message from re-popping on every
    *  status poll / remount; a new failure text re-opens the modal. */
@@ -326,9 +353,29 @@ function coreDisplayName(kind: string | null | undefined): string {
       .catch(() => undefined);
   }, []);
 
+  // requestCaptureMode is defined by the hook below but the retry action
+  // needs to call back into it — a ref breaks the definition-order cycle
+  // without restructuring the hook wiring.
+  const requestCaptureModeRef = useRef<((mode: CaptureMode) => void) | null>(
+    null,
+  );
+
   const onCaptureError = useCallback((msg: string) => {
     setError(msg);
-  }, []);
+    setErrorAction(
+      isTunPermissionError(msg)
+        ? {
+            forMessage: msg,
+            label: t("dashboard.tunReauthorize"),
+            onClick: () => {
+              setError(null);
+              setErrorAction(null);
+              requestCaptureModeRef.current?.("tun");
+            },
+          }
+        : null,
+    );
+  }, [t]);
 
   // Hook only invokes this when the drain batch touched TUN (core restart).
   const onCaptureApplied = useCallback(() => {
@@ -341,6 +388,7 @@ function coreDisplayName(kind: string | null | undefined): string {
     onCaptureError,
     onCaptureApplied,
   );
+  requestCaptureModeRef.current = requestCaptureMode;
 
   useVisibleInterval(() => {
     // Do not clobber optimistic capture UI while a switch is in flight.
@@ -896,7 +944,16 @@ function coreDisplayName(kind: string | null | undefined): string {
     <div className="page dashboard-page">
       {toast && <div className="toast">{toast}</div>}
       {error && (
-        <ErrorModal message={error} onClose={() => setError(null)} />
+        <ErrorModal
+          message={error}
+          onClose={() => {
+            setError(null);
+            setErrorAction(null);
+          }}
+          action={
+            errorAction?.forMessage === error ? errorAction : undefined
+          }
+        />
       )}
       {coreErrorText != null && coreErrorText !== dismissedCoreError && (
         <ErrorModal

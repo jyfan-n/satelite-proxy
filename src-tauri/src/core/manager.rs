@@ -84,6 +84,21 @@ impl CoreManager {
         self.state
     }
 
+    /// True when the current core session is a Windows UAC-elevated
+    /// process. Exact by construction — `elevated_pid` is set only right
+    /// after this app's own `run_elevated` call succeeds (see
+    /// `start_elevated_windows`), so there's no stale-state risk the way a
+    /// filesystem-persisted bit (macOS setuid) would have: macOS instead
+    /// reads the running process' actual uid every poll (`core::memory`,
+    /// `read_process_is_root`) rather than remembering how it got started,
+    /// because a setuid-root sing-box can predate this app session (started
+    /// under old code, left running across an app restart, etc.) — a
+    /// remembered flag would miss exactly that case.
+    #[allow(dead_code)] // read only on non-macOS (runtime.rs's core_elevated)
+    pub fn is_windows_elevated(&self) -> bool {
+        matches!(self.run_mode, RunMode::ElevatedPid) && self.is_running()
+    }
+
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
@@ -331,6 +346,67 @@ impl CoreManager {
     ///   then normal sidecar spawn (euid root, ruid user — parent can kill).
     /// - **Windows**: UAC-elevate the core directly.
     pub fn start_with_ports(
+        &mut self,
+        kind: CoreKind,
+        binary: &Path,
+        config: &Path,
+        log_dir: &Path,
+        mixed_port: u16,
+        api_port: Option<u16>,
+        extra_ports: &[u16],
+        elevated: bool,
+        resource_dir: Option<&Path>,
+    ) -> AppResult<()> {
+        match self.start_with_ports_inner(
+            kind,
+            binary,
+            config,
+            log_dir,
+            mixed_port,
+            api_port,
+            extra_ports,
+            elevated,
+            resource_dir,
+        ) {
+            Err(e) if is_stale_cache_db_error(&e.to_string()) => {
+                // A previous session (usually setuid-root under TUN) left
+                // cache.db owned by another user/euid; this session's core
+                // can no longer open it for writing. The file is pure cache
+                // (fakeip mappings + rule-set cache) — safe to drop and let
+                // the core rebuild it. Removing a root-owned file needs the
+                // same one-time admin prompt as setuid, so reuse it here
+                // instead of surfacing a dead-end "permission denied".
+                #[cfg(target_os = "macos")]
+                if let Some(dir) = config.parent() {
+                    let cache_path = dir.join("cache.db");
+                    crate::app_log::warn(
+                        "core",
+                        format!(
+                            "stale cache.db blocked start ({e}); removing with admin prompt: {}",
+                            cache_path.display()
+                        ),
+                    );
+                    super::macos_auth::remove_stale_cache_db(&cache_path)?;
+                    return self.start_with_ports_inner(
+                        kind,
+                        binary,
+                        config,
+                        log_dir,
+                        mixed_port,
+                        api_port,
+                        extra_ports,
+                        elevated,
+                        resource_dir,
+                    );
+                }
+                Err(e)
+            }
+            other => other,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_ports_inner(
         &mut self,
         kind: CoreKind,
         binary: &Path,
@@ -827,6 +903,18 @@ fn elevated_kill_force(pid: u32) {
     }
 }
 
+/// True when `err` is sing-box's `cache_file` init dying on a `cache.db`
+/// left behind by a *different* euid — typically a setuid-root TUN session
+/// from before a core update dropped the setuid bit. Deliberately narrower
+/// than the generic TUN-permission match below: this is a stale-file
+/// problem, not a missing-privilege one, and gets its own recovery path
+/// (delete-and-retry in `start_with_ports`) instead of the TUN hint, which
+/// would send the user to toggle a switch that has nothing to do with it.
+fn is_stale_cache_db_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("cache.db") && lower.contains("permission denied")
+}
+
 fn map_tun_permission_hint(err: &str) -> String {
     let lower = err.to_ascii_lowercase();
     if lower.contains("operation not permitted")
@@ -1245,5 +1333,80 @@ mod cwd_tests {
         // Building/inspecting the command must not panic regardless of what
         // `parent()` returned for this degenerate path.
         let _ = format!("{cmd:?}");
+    }
+}
+
+#[cfg(test)]
+mod stale_cache_db_tests {
+    //! `is_stale_cache_db_error` must fire on the exact FATAL sing-box emits
+    //! when `cache.db` is owned by a different euid (stale setuid-root
+    //! leftover) — the case that needs delete-and-retry, not the TUN-setuid
+    //! hint. It must NOT fire on a generic TUN "permission denied" (adapter
+    //! creation denied), which needs the setuid prompt instead: routing that
+    //! case here would retry a delete that can't fix a missing privilege
+    //! and never show the user the hint that actually gets them unstuck.
+    use super::is_stale_cache_db_error;
+
+    #[test]
+    fn matches_the_real_cache_file_fatal() {
+        let err = "FATAL[0001] start service: initialize cache-file: open cache.db: permission denied";
+        assert!(is_stale_cache_db_error(err));
+    }
+
+    #[test]
+    fn does_not_match_generic_tun_permission_denied() {
+        let err = "operation not permitted: configure tun";
+        assert!(!is_stale_cache_db_error(err));
+    }
+
+    #[test]
+    fn does_not_match_permission_denied_without_cache_db() {
+        // Some other file under the config dir could also hit EACCES; only
+        // cache.db has the known stale-euid failure mode and a safe fix
+        // (delete — it's rebuildable cache, not user data).
+        let err = "open active.json: permission denied";
+        assert!(!is_stale_cache_db_error(err));
+    }
+}
+
+#[cfg(test)]
+mod is_windows_elevated_tests {
+    //! `is_windows_elevated()` backs the dashboard's ROOT badge on Windows.
+    //! It must reflect BOTH "the tracked run mode is the elevated one" AND
+    //! "the process is actually still running" — a stale `ElevatedPid` from
+    //! a session that already exited should not light the badge (the
+    //! sidecar `Sidecar` mode, or the default `None`, must not either).
+    use super::{CoreManager, CoreState, RunMode};
+
+    #[test]
+    fn false_by_default() {
+        let mgr = CoreManager::default();
+        assert!(!mgr.is_windows_elevated());
+    }
+
+    #[test]
+    fn false_when_elevated_pid_mode_but_not_running() {
+        let mut mgr = CoreManager::default();
+        mgr.run_mode = RunMode::ElevatedPid;
+        mgr.elevated_pid = Some(4242);
+        mgr.state = CoreState::Stopped;
+        assert!(!mgr.is_windows_elevated());
+    }
+
+    #[test]
+    fn false_when_running_as_plain_sidecar() {
+        let mut mgr = CoreManager::default();
+        mgr.run_mode = RunMode::Sidecar;
+        mgr.state = CoreState::Running;
+        assert!(!mgr.is_windows_elevated());
+    }
+
+    #[test]
+    fn true_when_elevated_pid_mode_and_running() {
+        let mut mgr = CoreManager::default();
+        mgr.run_mode = RunMode::ElevatedPid;
+        mgr.elevated_pid = Some(4242);
+        mgr.state = CoreState::Running;
+        assert!(mgr.is_windows_elevated());
     }
 }

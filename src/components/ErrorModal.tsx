@@ -7,6 +7,11 @@ interface Props {
   onClose: () => void;
   /** Dialog caption; defaults to the generic "Error". */
   title?: string;
+  /** Optional recovery action (e.g. "retry with admin prompt") shown as an
+   *  extra primary button. Does not auto-close the modal — the caller's
+   *  onClick decides (usually it re-runs the failed operation, which will
+   *  either replace this modal with a fresh error or clear it on success). */
+  action?: { label: string; onClick: () => void };
 }
 
 /**
@@ -19,7 +24,7 @@ interface Props {
  * raised while a dialog is open still paint on top. Clicking the veil closes
  * it; clicks inside are stopped so text selection never dismisses by accident.
  */
-export function ErrorModal({ message, onClose, title }: Props) {
+export function ErrorModal({ message, onClose, title, action }: Props) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<number | null>(null);
@@ -68,6 +73,11 @@ export function ErrorModal({ message, onClose, title }: Props) {
           <GlassButton onClick={() => void onCopy()}>
             {copied ? t("common.copied") : t("common.copy")}
           </GlassButton>
+          {action && (
+            <GlassButton variant="primary" onClick={action.onClick}>
+              {action.label}
+            </GlassButton>
+          )}
           <GlassButton variant="primary" onClick={onClose}>
             {t("common.close")}
           </GlassButton>
