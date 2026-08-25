@@ -93,6 +93,12 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
             // can recreate a window that never becomes key.
             .visible(true)
             .focused(true);
+        // Portable: keep the WebView2 profile next to the exe — otherwise the
+        // recreated webview silently spawns a second profile in %LOCALAPPDATA%.
+        let builder = match crate::portable::webview_data_dir() {
+            Some(dir) => builder.data_directory(dir),
+            None => builder,
+        };
         // Simple mode: user-resizable strip, shrink-only (frontend restores size).
         let builder = if mode == "simple" {
             builder
