@@ -3801,6 +3801,12 @@ code {
   box-sizing: border-box;
 }
 
+/* Match the DNS page's text inputs (background blends into the card via
+   --surface) instead of the standalone-modal --input-bg used elsewhere. */
+.settings-ports-page .settings-form-grid input {
+  background: var(--surface);
+}
+
 /* Read-only Clash API secret field: mono input + copy button on one line. */
 .api-secret-row {
   display: flex;
@@ -4521,6 +4527,33 @@ button.check.on {
   line-height: 1.4;
 }
 
+.field-hint-warn {
+  font-size: 0.75rem;
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--warning);
+  line-height: 1.4;
+}
+
+/* Inline pill next to a field label, e.g. flagging the API port isn't the
+   proxy port — small enough to not compete with the label. */
+.field-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  vertical-align: middle;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.field-badge-warn {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
 /* Payload URL-suggestion button (RulesPage): a GlassButton sized to its
    content, left-aligned under the input rather than stretched by .field's
    flex-column layout. */
@@ -4605,6 +4638,32 @@ button.check.on {
 
 .field:has(.solid-select.open) {
   z-index: 5;
+}
+
+/* Thin separator between grouped fields in a settings-form-grid (e.g. above
+   the Clash API port, to set it apart from the proxy-facing settings above). */
+.field-divider {
+  height: 1px;
+  margin: 0.15rem 0;
+  background: var(--border);
+}
+
+/* Label + input on one line (proxy port / API port): the label keeps a
+   fixed width so both inputs line up, the hint below still spans full width. */
+.field-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.field-inline-label {
+  flex-shrink: 0;
+  min-width: 6.5em;
+}
+
+.field-inline-row input {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Rule modal: system DNS row (must stay visible after DIRECT selected) */

@@ -256,7 +256,14 @@ const en = {
     "Show the originating app for each connection in the traffic page. Disable to save CPU",
   "settings.toggleSaveNote": "Toggles save immediately.",
   "settings.mixedPort": "Mixed inbound port",
+  "settings.mixedPortHint": "This is the proxy port — set it in your browser/app's proxy settings.",
   "settings.apiPort": "Clash API port",
+  "settings.apiPortBadge": "Not a proxy port",
+  "settings.apiPortHint":
+    "For the app's own control panel/monitoring only — do NOT set this as your proxy port, it will not work as a proxy.",
+  "settings.apiSecretEnabled": "Clash API secret",
+  "settings.apiSecretEnabledDesc":
+    "Off by default. Turn on only if an external tool needs to authenticate against the Clash API.",
   "settings.apiSecret": "Clash API secret",
   "settings.apiSecretHint":
     "External tools must send it as Authorization: Bearer <secret> to call http://127.0.0.1:port. Regenerating restarts a running core",
@@ -1009,8 +1016,14 @@ const zh: Record<MessageKey, string> = {
   "settings.findProcess": "解析进程名",
   "settings.findProcessDesc": "在流量页显示每条连接的发起程序；关闭可节省 CPU 占用",
   "settings.toggleSaveNote": "开关即时保存。",
-  "settings.mixedPort": "Mixed 入站端口",
+  "settings.mixedPort": "代理端口",
+  "settings.mixedPortHint": "这是代理端口，浏览器/软件设置代理时填这个。",
   "settings.apiPort": "Clash API 端口",
+  "settings.apiPortBadge": "非代理端口",
+  "settings.apiPortHint": "仅供本软件读取状态用，不是代理端口，请勿填入代理软件。",
+  "settings.apiSecretEnabled": "Clash API 密钥",
+  "settings.apiSecretEnabledDesc":
+    "默认关闭。仅当有外部工具需要通过密钥访问 Clash API 时才需要开启。",
   "settings.apiSecret": "Clash API 密钥",
   "settings.apiSecretHint":
     "外部工具访问 http://127.0.0.1:端口 时需携带 Authorization: Bearer <密钥>；重新生成会在内核运行时自动重启生效",

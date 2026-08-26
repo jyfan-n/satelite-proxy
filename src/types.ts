@@ -259,6 +259,8 @@ export interface AppSettings {
   extra_inbounds?: ExtraInbound[];
   current_node_id?: string | null;
   clash_api_secret?: string | null;
+  /** Gate for clash_api_secret; off by default. */
+  api_secret_enabled?: boolean;
   probe_url: string;
   /** Multi-subscription enable (Mix). */
   mix_mode?: boolean;

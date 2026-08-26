@@ -235,6 +235,8 @@ export interface SettingsUpdatePayload {
   /** Main mixed inbound listens on 0.0.0.0 (LAN) instead of 127.0.0.1. */
   allowLan?: boolean | null;
   apiPort?: number | null;
+  /** Gate for the Clash API secret (off by default). */
+  apiSecretEnabled?: boolean | null;
   /** Some(list) replaces the whole extra-inbound list. */
   extraInbounds?: import("./types").ExtraInbound[] | null;
   probeUrl?: string | null;
@@ -290,6 +292,7 @@ function scheduleSettingsWrite() {
     void invoke<AppSettings>("update_settings", {
       mixedPort: payload.mixedPort ?? null,
       apiPort: payload.apiPort ?? null,
+      apiSecretEnabled: payload.apiSecretEnabled ?? null,
       extraInbounds: payload.extraInbounds ?? null,
       probeUrl: payload.probeUrl ?? null,
       tunEnabled: payload.tunEnabled ?? null,

@@ -207,6 +207,26 @@ pub fn resolve_pending_elevation(
     Some(bin)
 }
 
+/// Resolve the Clash API secret to build the next sing-box/mihomo config
+/// with, honoring `api_secret_enabled`. Disabled → clears any stored secret
+/// and returns empty (both cores treat an empty `secret` as no auth).
+/// Enabled → reuses the persisted secret, generating one only if missing
+/// (old stores predating this toggle, or a freshly-enabled one).
+fn resolve_clash_api_secret(store: &mut AppStore) -> String {
+    if !store.settings.api_secret_enabled {
+        store.settings.clash_api_secret = None;
+        return String::new();
+    }
+    let secret = store
+        .settings
+        .clash_api_secret
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(generate_api_secret);
+    store.settings.clash_api_secret = Some(secret.clone());
+    secret
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Self {
@@ -811,17 +831,12 @@ impl Runtime {
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::SingBox);
         let bin = bin.ok_or_else(|| AppError::Core("sing-box binary not found".into()))?;
 
-        // Reuse the persisted clash_api secret so it survives restarts; only
-        // old stores (field missing/empty) get one generated on first start.
-        let secret = store
-            .settings
-            .clash_api_secret
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(generate_api_secret);
+        // Reuse the persisted clash_api secret so it survives restarts, or
+        // clear it when the user has the secret toggle off (see
+        // resolve_clash_api_secret / api_secret_enabled).
+        let secret = resolve_clash_api_secret(store);
         let built = build_singbox_config(&nodes, &build_options(store, secret.clone()))?;
         let config_path = write_active_config(app_data_dir, &built)?;
-        store.settings.clash_api_secret = Some(secret.clone());
         if store.settings.current_node_id.is_none() {
             if let Some(first) = nodes.first() {
                 store.settings.current_node_id = Some(first.id.clone());
@@ -1157,15 +1172,9 @@ impl Runtime {
         crate::core::ensure_mihomo_geodata(app_data_dir, resource_dir, None)?;
 
         // Reuse the persisted clash_api secret (same policy as sing-box).
-        let secret = store
-            .settings
-            .clash_api_secret
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(generate_api_secret);
+        let secret = resolve_clash_api_secret(store);
         let built = build_mihomo_config(&nodes, &build_options(store, secret.clone()))?;
         let config_path = write_active_yaml_config(app_data_dir, &built.yaml)?;
-        store.settings.clash_api_secret = Some(secret.clone());
         // Mirror the selected node onto the store when the persisted pick is
         // absent or incompatible (the generator falls back likewise), so the
         // UI and config agree and switching stays on a usable node.
@@ -1795,6 +1804,45 @@ fn format_rule(rule: &str, payload: &str) -> String {
         return payload.to_string();
     }
     format!("{rule}({payload})")
+}
+
+#[cfg(test)]
+mod clash_api_secret_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_toggle_clears_any_stored_secret_and_returns_empty() {
+        // Turning the toggle off must actually wipe the persisted secret —
+        // otherwise the UI could still display/copy a "dead" key that no
+        // longer matches what's in the running config.
+        let mut store = AppStore::default();
+        store.settings.api_secret_enabled = false;
+        store.settings.clash_api_secret = Some("leftover".into());
+        let secret = resolve_clash_api_secret(&mut store);
+        assert_eq!(secret, "");
+        assert_eq!(store.settings.clash_api_secret, None);
+    }
+
+    #[test]
+    fn enabled_toggle_generates_a_secret_when_none_is_stored() {
+        let mut store = AppStore::default();
+        store.settings.api_secret_enabled = true;
+        store.settings.clash_api_secret = None;
+        let secret = resolve_clash_api_secret(&mut store);
+        assert!(!secret.is_empty());
+        assert_eq!(store.settings.clash_api_secret, Some(secret));
+    }
+
+    #[test]
+    fn enabled_toggle_reuses_the_persisted_secret_across_restarts() {
+        // Regenerating on every restart would silently break any external
+        // tool that saved the previous secret.
+        let mut store = AppStore::default();
+        store.settings.api_secret_enabled = true;
+        store.settings.clash_api_secret = Some("kept-secret".into());
+        let secret = resolve_clash_api_secret(&mut store);
+        assert_eq!(secret, "kept-secret");
+    }
 }
 
 #[cfg(test)]
