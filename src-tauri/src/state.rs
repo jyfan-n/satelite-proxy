@@ -654,6 +654,36 @@ impl AppState {
         })
     }
 
+    /// Run the (possibly slow, interactive) macOS setuid authorization
+    /// *before* `start_proxy`/`restart_proxy` take the runtime/store locks.
+    ///
+    /// `ensure_core_setuid` can block for seconds waiting on a Touch ID /
+    /// password prompt — or much longer if that system dialog never surfaces
+    /// (headless/remote session). Doing that inside the runtime+store
+    /// critical section used to hold both locks for the entire wait, which
+    /// froze every other command that needed them (status polls fall back to
+    /// a cache and survive, but node switches, rule toggles, and settings
+    /// changes all queue on `lock_store`/`lock_runtime` and appear to hang
+    /// the whole UI). Doing it here means only this one call is exposed to
+    /// that latency; the store snapshot used to decide is read-and-released
+    /// up front, so it never contends with the slow part.
+    #[cfg(target_os = "macos")]
+    fn pre_authorize_setuid_if_needed(&self, resource_dir: Option<&Path>) -> AppResult<()> {
+        let pending = {
+            let store = self.lock_store();
+            crate::runtime::resolve_pending_elevation(&self.app_data_dir, resource_dir, &store)
+        };
+        if let Some(bin) = pending {
+            crate::core::ensure_core_setuid(&bin)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn pre_authorize_setuid_if_needed(&self, _resource_dir: Option<&Path>) -> AppResult<()> {
+        Ok(())
+    }
+
     fn cache_status(&self, status: &ProxyStatus) {
         *recover_lock(&self.status_cache, "status_cache") = status.clone();
     }
@@ -701,6 +731,7 @@ impl AppState {
     ) -> AppResult<ProxyStatus> {
         let _transition = self.begin_core_transition()?;
         self.mark_cached_core_state(CoreState::Starting);
+        self.pre_authorize_setuid_if_needed(resource_dir)?;
         let mut runtime = self.lock_runtime();
         let _persistence = self.lock_store_persistence();
         let mut store = self.lock_store();
@@ -760,6 +791,7 @@ impl AppState {
     pub fn restart_proxy(&self, resource_dir: Option<&Path>) -> AppResult<ProxyStatus> {
         let _transition = self.begin_core_transition()?;
         self.mark_cached_core_state(CoreState::Starting);
+        self.pre_authorize_setuid_if_needed(resource_dir)?;
         let mut runtime = self.lock_runtime();
         let _persistence = self.lock_store_persistence();
         let mut store = self.lock_store();
