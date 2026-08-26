@@ -66,6 +66,7 @@ impl AppStore {
         let schema_before = store.schema_version;
         store.settings.migrate_auto_select();
         store.settings.migrate_capture_mode();
+        store.settings.migrate_api_secret_enabled();
         store.dns.ensure_rule_sets();
         store.migrate_unified_rule_sets();
         store.ensure_rule_sets();

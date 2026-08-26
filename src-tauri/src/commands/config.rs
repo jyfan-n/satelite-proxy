@@ -70,6 +70,7 @@ pub fn update_settings(
     mixed_port: Option<u16>,
     allow_lan: Option<bool>,
     api_port: Option<u16>,
+    api_secret_enabled: Option<bool>,
     extra_inbounds: Option<Vec<crate::domain::ExtraInbound>>,
     probe_url: Option<String>,
     tun_enabled: Option<bool>,
@@ -113,6 +114,12 @@ pub fn update_settings(
             }
             if let Some(p) = api_port {
                 store.settings.api_port = p;
+            }
+            if let Some(v) = api_secret_enabled {
+                store.settings.api_secret_enabled = v;
+                if !v {
+                    store.settings.clash_api_secret = None;
+                }
             }
             if let Some(list) = &extra_inbounds {
                 if list.len() > 10 {

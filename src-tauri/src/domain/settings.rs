@@ -190,6 +190,14 @@ pub struct AppSettings {
     /// Secret written into last generated config (for future clash_api client)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_api_secret: Option<String>,
+    /// Gate for `clash_api_secret`: off by default (Clash API stays open on
+    /// 127.0.0.1, matching sing-box/mihomo's own default) so first-run users
+    /// never see an unexplained secret. Stores upgrading from before this
+    /// field existed are migrated in `AppStore::migrate_api_secret_enabled`
+    /// (turned on only if they already had a non-empty secret), since a
+    /// plain serde field default can't see a sibling field's value.
+    #[serde(default)]
+    pub api_secret_enabled: bool,
     /// Probe URL for latency tests (future)
     #[serde(default = "default_probe_url")]
     pub probe_url: String,
@@ -408,6 +416,7 @@ impl Default for AppSettings {
             extra_inbounds: Vec::new(),
             current_node_id: None,
             clash_api_secret: None,
+            api_secret_enabled: false,
             probe_url: default_probe_url(),
             mix_mode: false,
             tun_enabled: false,
@@ -466,6 +475,21 @@ impl AppSettings {
         self.smart_switch = self.auto_select.is_smart();
     }
 
+    /// Stores from before `api_secret_enabled` existed always carried a
+    /// secret (it used to be unconditional) — keep it enabled for them so
+    /// upgrading doesn't silently drop auth for anyone already relying on
+    /// it. New/clean stores start with the field's own `false` default.
+    pub fn migrate_api_secret_enabled(&mut self) {
+        if !self.api_secret_enabled
+            && self
+                .clash_api_secret
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            self.api_secret_enabled = true;
+        }
+    }
+
     /// Normalize `route.final` tag: proxy | direct | block.
     pub fn normalized_route_final(&self) -> &str {
         match self.route_final.to_ascii_lowercase().as_str() {
@@ -502,6 +526,37 @@ mod tests {
         settings.migrate_capture_mode();
         assert_eq!(settings.capture_mode, CaptureMode::System);
         assert!(!settings.tun_enabled);
+    }
+
+    #[test]
+    fn new_store_keeps_api_secret_disabled_by_default() {
+        // A clean/new AppSettings never had a secret, so the migration is a
+        // no-op: users who never turned this on don't get surprised by it.
+        let mut settings = AppSettings::default();
+        settings.migrate_api_secret_enabled();
+        assert!(!settings.api_secret_enabled);
+    }
+
+    #[test]
+    fn store_with_a_preexisting_secret_migrates_to_enabled() {
+        // Pre-toggle stores always carried a secret unconditionally — treat
+        // that as "was enabled" so upgrading doesn't drop anyone's auth.
+        let mut settings = AppSettings {
+            clash_api_secret: Some("abc123".into()),
+            ..AppSettings::default()
+        };
+        settings.migrate_api_secret_enabled();
+        assert!(settings.api_secret_enabled);
+    }
+
+    #[test]
+    fn store_with_an_empty_secret_field_stays_disabled() {
+        let mut settings = AppSettings {
+            clash_api_secret: Some("   ".into()),
+            ..AppSettings::default()
+        };
+        settings.migrate_api_secret_enabled();
+        assert!(!settings.api_secret_enabled);
     }
 
     #[test]

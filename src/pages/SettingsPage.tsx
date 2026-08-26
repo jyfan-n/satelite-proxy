@@ -116,6 +116,9 @@ export function SettingsPage() {
   /** Main mixed inbound listens on 0.0.0.0 (LAN) instead of 127.0.0.1. */
   const [allowLan, setAllowLan] = useState(false);
   const [api, setApi] = useState("19090");
+  /** Gate for the Clash API secret — off by default (no unexplained key for
+   * first-run users); the API stays reachable on 127.0.0.1 either way. */
+  const [apiSecretEnabled, setApiSecretEnabled] = useState(false);
   const [probe, setProbe] = useState("");
   const [tunStack, setTunStack] = useState("mixed");
   /** IPv6 address on the TUN interface. Off by default — most nodes have no
@@ -264,6 +267,7 @@ export function SettingsPage() {
         setMixed(String(s.mixed_port));
         setAllowLan(!!s.allow_lan);
         setApi(String(s.api_port));
+        setApiSecretEnabled(!!s.api_secret_enabled);
         setProbe(s.probe_url);
         setTunStack(s.tun_stack || "mixed");
         setTunIpv6(!!s.tun_ipv6_enabled);
@@ -382,6 +386,7 @@ export function SettingsPage() {
       String(settings.mixed_port) !== mixed.trim() ||
       !!settings.allow_lan !== allowLan ||
       String(settings.api_port) !== api.trim() ||
+      !!settings.api_secret_enabled !== apiSecretEnabled ||
       (settings.probe_url ?? "") !== probe ||
       (settings.tun_stack || "mixed") !== tunStack ||
       !!settings.tun_ipv6_enabled !== tunIpv6 ||
@@ -417,6 +422,7 @@ export function SettingsPage() {
         mixedPort,
         allowLan,
         apiPort,
+        apiSecretEnabled,
         extraInbounds: extra,
         probeUrl: probe.trim() || null,
         tunStack: tunStack.trim() || "mixed",
@@ -438,7 +444,7 @@ export function SettingsPage() {
       // Pick up edits made while we were applying.
       void autoApplyRef.current();
     }
-  }, [allowLan, api, blockQuic, bypassLan, extra, mixed, probe, settings, t, tunIpv6, tunStack]);
+  }, [allowLan, api, apiSecretEnabled, blockQuic, bypassLan, extra, mixed, probe, settings, t, tunIpv6, tunStack]);
 
   autoApplyRef.current = autoApplyNetwork;
 
@@ -450,7 +456,7 @@ export function SettingsPage() {
     return () => clearTimeout(timer);
     // Fire on any draft change; autoApplyNetwork itself decides if there is
     // anything valid and dirty to commit.
-  }, [settings, mixed, allowLan, api, probe, tunStack, tunIpv6, blockQuic, bypassLan, extra]);
+  }, [settings, mixed, allowLan, api, apiSecretEnabled, probe, tunStack, tunIpv6, blockQuic, bypassLan, extra]);
 
   // —— Extra inbound listeners (draft rows + modal editor) ——
 
@@ -817,6 +823,8 @@ export function SettingsPage() {
   }
 
   const customRuntime = (settings?.runtime_source ?? "").startsWith("singbox:");
+  /** Xray has no Clash API / clash_api_secret concept — hide that control. */
+  const xrayCore = (settings?.core_type ?? "singbox") === "xray";
 
   useEffect(() => {
     if (customRuntime && CUSTOM_BLOCKED_TABS.has(tab)) {
@@ -1183,63 +1191,20 @@ export function SettingsPage() {
         <section className="settings-panel" aria-label="Ports">
           <div className="settings-ports-columns">
             <div className="card settings-form settings-form-grid">
-              <label className="field">
-                <span>{t("settings.mixedPort")}</span>
-                <input
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  className="mono"
-                  value={mixed}
-                  disabled={(settings?.runtime_source ?? "").startsWith("singbox:")}
-                  onChange={(e) => setMixed(e.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>{t("settings.apiPort")}</span>
-                <input
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  className="mono"
-                  value={api}
-                  disabled={(settings?.runtime_source ?? "").startsWith("singbox:")}
-                  onChange={(e) => setApi(e.target.value)}
-                />
-              </label>
-              <div className="field field-span-2">
-                <span>{t("settings.apiSecret")}</span>
-                <div className="api-secret-row">
+              <label className="field field-inline field-span-2">
+                <span className="field-inline-row">
+                  <span className="field-inline-label">{t("settings.mixedPort")}</span>
                   <input
-                    readOnly
                     autoCapitalize="off"
                     autoCorrect="off"
                     spellCheck={false}
-                    className="mono api-secret-input"
-                    value={settings?.clash_api_secret ?? ""}
-                    placeholder={t("settings.apiSecretNone")}
+                    value={mixed}
+                    disabled={(settings?.runtime_source ?? "").startsWith("singbox:")}
+                    onChange={(e) => setMixed(e.target.value)}
                   />
-                  <GlassButton
-                    icon={secretCopied ? "✓" : "⧉"}
-                    disabled={!settings?.clash_api_secret}
-                    onClick={() => void onCopySecret()}
-                    title={t("common.copy")}
-                  >
-                    {secretCopied ? t("common.copied") : t("common.copy")}
-                  </GlassButton>
-                  <GlassButton
-                    icon="↻"
-                    disabled={busy || customRuntime}
-                    onClick={() => void onRegenerateSecret()}
-                    title={t("settings.regenerateSecret")}
-                  >
-                    {t("settings.regenerateSecret")}
-                  </GlassButton>
-                </div>
-                <span className="field-hint muted">
-                  {t("settings.apiSecretHint")}
                 </span>
-              </div>
+                <span className="field-hint muted">{t("settings.mixedPortHint")}</span>
+              </label>
               <div className="via-proxy-row field-span-2">
                 <div>
                   <div className="sys-proxy-title">{t("settings.allowLan")}</div>
@@ -1260,7 +1225,6 @@ export function SettingsPage() {
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
-                  className="mono"
                   value={probe}
                   onChange={(e) => setProbe(e.target.value)}
                   placeholder="https://…"
@@ -1323,6 +1287,77 @@ export function SettingsPage() {
                   onChange={setBypassLan}
                 />
               </div>
+              <div className="field-divider field-span-2" />
+              <label className="field field-inline field-span-2">
+                <span className="field-inline-row">
+                  <span className="field-inline-label">
+                    {t("settings.apiPort")}
+                    <span className="field-badge field-badge-warn">
+                      {t("settings.apiPortBadge")}
+                    </span>
+                  </span>
+                  <input
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={api}
+                    disabled={(settings?.runtime_source ?? "").startsWith("singbox:")}
+                    onChange={(e) => setApi(e.target.value)}
+                  />
+                </span>
+                <span className="field-hint field-hint-warn">
+                  {t("settings.apiPortHint")}
+                </span>
+              </label>
+              <div className="via-proxy-row field-span-2">
+                <div>
+                  <div className="sys-proxy-title">{t("settings.apiSecretEnabled")}</div>
+                  <div className="sys-proxy-desc">
+                    {t("settings.apiSecretEnabledDesc")}
+                  </div>
+                </div>
+                <GlassSwitchControl
+                  checked={apiSecretEnabled}
+                  title={t("settings.apiSecretEnabled")}
+                  disabled={busy || customRuntime || xrayCore}
+                  onChange={setApiSecretEnabled}
+                />
+              </div>
+              {!xrayCore && apiSecretEnabled && (
+                <div className="field field-span-2">
+                  <span>{t("settings.apiSecret")}</span>
+                  <div className="api-secret-row">
+                    <input
+                      readOnly
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      className="mono api-secret-input"
+                      value={settings?.clash_api_secret ?? ""}
+                      placeholder={t("settings.apiSecretNone")}
+                    />
+                    <GlassButton
+                      icon={secretCopied ? "✓" : "⧉"}
+                      disabled={!settings?.clash_api_secret}
+                      onClick={() => void onCopySecret()}
+                      title={t("common.copy")}
+                    >
+                      {secretCopied ? t("common.copied") : t("common.copy")}
+                    </GlassButton>
+                    <GlassButton
+                      icon="↻"
+                      disabled={busy || customRuntime}
+                      onClick={() => void onRegenerateSecret()}
+                      title={t("settings.regenerateSecret")}
+                    >
+                      {t("settings.regenerateSecret")}
+                    </GlassButton>
+                  </div>
+                  <span className="field-hint muted">
+                    {t("settings.apiSecretHint")}
+                  </span>
+                </div>
+              )}
               {netDiagnostics.length > 0 && (
                 <div className="field-span-2 diagnostic-banner-list">
                   {netDiagnostics.map((d) => (
@@ -1704,7 +1739,6 @@ export function SettingsPage() {
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
-                  className="mono"
                   value={inboundPort}
                   onChange={(e) => setInboundPort(e.target.value)}
                   placeholder="8080"

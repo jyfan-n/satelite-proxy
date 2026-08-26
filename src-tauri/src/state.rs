@@ -1475,6 +1475,11 @@ impl AppState {
                 "自写配置模式下无法重新生成密钥，请在配置文件里自行修改".into(),
             ));
         }
+        if !store.settings.api_secret_enabled {
+            return Err(crate::error::AppError::Core(
+                "密钥已关闭，请先开启密钥保护后再重新生成".into(),
+            ));
+        }
 
         store.settings.clash_api_secret = Some(crate::config::generate_api_secret());
         store.save(&self.store_path)?;
