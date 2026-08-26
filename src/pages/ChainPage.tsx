@@ -215,7 +215,6 @@ function HopNode({ data }: NodeProps) {
         stale ? " stale" : ""
       }${role ? ` ${role}` : ""}`}
     >
-      <span className="chain-hop-topline" aria-hidden="true" />
       <Handle type="target" position={Position.Left} isConnectableStart={false} />
       <div className="chain-hop-head">
         {kind === "pool" && (
