@@ -393,7 +393,10 @@ fn default_glow_color() -> String {
 }
 
 fn default_hero_style() -> String {
-    "particle".into()
+    // FaceMark (Canvas2D) is the default hero: the three.js particle sphere
+    // costs a 530KB chunk + WebGL context on every WebView recreate, which
+    // dominated the low-memory tray-wake path (see docs/webview2-memory-optimization-plan.md).
+    "smiley".into()
 }
 
 impl Default for AppSettings {

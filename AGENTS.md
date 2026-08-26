@@ -1,7 +1,7 @@
 # AGENTS.md — Satelite Proxy 项目地图
 
 面向 AI agent 的项目速查文档。读完本文即可定位绝大多数代码，无需重复探索。
-最后核对：2026-08-23（v1.0.9，三内核：sing-box / Xray / mihomo）。
+最后核对：2026-08-26（v1.0.9，三内核：sing-box / Xray / mihomo；新增 Windows 便携版）。
 
 ## 0. 阅读与维护规则（必读）
 
@@ -68,6 +68,10 @@ pwsh scripts/build-windows.ps1                        # NSIS 安装包，仅 sin
 pwsh scripts/build-windows.ps1 -Bundle msi            # MSI
 pwsh scripts/build-windows.ps1 -AllCores              # 额外打包 Xray + mihomo（缺失自动 fetch）
 
+# Windows 便携版（产物: src-tauri/target/release/bundle/portable/Satelite_<版本>_x64_portable.zip）
+pwsh scripts/build-windows.ps1 -Bundle portable       # 解压即用 zip：exe + resources/ + portable.flag（见 §9.19）
+pwsh scripts/build-windows.ps1 -Bundle portable -AllCores  # 三内核便携版
+
 打包默认只含 sing-box 内核（经 `tauri.singbox-<平台>.conf.json` overlay 瘦身 resources，
 否则缺失文件会让 bundler 失败）；`--all-cores`/`-AllCores` 才把 Xray+mihomo（含 geodata）
 打进安装包，缺失时自动调 fetch 脚本。三入口切内核 UI 不受影响——未打包的内核可经设置页下载。
@@ -125,6 +129,7 @@ satelite-proxy/
 │   ├── src/commands/        # Tauri command 分层（按域拆文件）
 │   ├── src/domain/          # ★ 核心数据模型（node/rule/dns/settings/subscription）
 │   ├── src/state.rs         # AppState：全局状态中枢（1321 行）
+│   ├── src/portable.rs      # 便携模式：portable.flag 检测，数据目录与 WebView2 目录重定向（见 §9.19）
 │   ├── src/storage/store.rs # AppStore 持久化（JSON，含备份/迁移，2666 行）
 │   ├── src/config/          # 配置生成：builder.rs（sing-box）+ xray.rs（Xray）+ mihomo.rs（mihomo/Clash YAML）+ dns_build/write/…
 │   ├── src/core/            # 内核进程管理：kind.rs（CoreKind 三内核描述）、manager/download/assets/paths/提权/Job Object
@@ -169,7 +174,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.1 入口与生命周期
 
-- `lib.rs` — `run()`：插件注册（opener/dialog/deep-link/single-instance）→ setup（加载 store 失败则弹窗退出）→ 托盘 → 启动 6 个后台任务 → 深链处理 → 静默启动/自动代理恢复。**全部 ~80 个 command 在 `lib.rs:348-431` 注册**，实现在 `commands/*.rs`（`commands/mod.rs` re-export）。
+- `lib.rs` — `run()`：便携模式预检（`portable::patch_context`，见 §9.19）→ 插件注册（opener/dialog/deep-link/single-instance）→ setup（便携时先重建主窗口；加载 store 失败则弹窗退出）→ 托盘 → 启动 6 个后台任务 → 深链处理 → 静默启动/自动代理恢复。**全部 ~80 个 command 在 `lib.rs:348-431` 注册**，实现在 `commands/*.rs`（`commands/mod.rs` re-export）。
 - 后台任务（均在 setup 中 spawn）：
   - `conn_journal.rs` — 轮询/WS 订阅 Clash 连接快照（UI 可见时 100ms，托盘时降频），维护活跃+历史连接环形日志
   - `subscription_auto.rs` — 按 `auto_update` 间隔定时刷新订阅（默认 1440 分钟）
@@ -300,7 +305,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 ### 6.6 i18n / 主题 / 其他工具模块
 
 - `i18n/messages.ts` — `en`（630 键，`as const`）+ `zh: Record<MessageKey, string>`。**加文案必须两边同加，否则 TS 编译错**。键前缀：`common./nav./simple./dashboard./nodes./config./traffic./conn./logs./settings./rules./dns./hosts./failures.`；`translate()` 支持 `{n}` 插值。
-- `theme/` — `ThemeId = "aerospace"(深,默认) | "day"`；`accents.ts` 6 个主题色，由一个基色派生整个 `--primary*` 变量族（Rec.709 亮度决定 `--on-primary`）。语义色 `--success*` 为固定绿（App.css tokens），**不随主题色**（ok/直连/测速良好语义稳定）；自定义 `#rrggbb` accent 在 `applyAccentToDom` 应用时按主题做亮度钳制（深色提亮 ≥0.5 / 浅色加深 ≤0.6）保证文字对比度，存储仍保留原始 hex。另有独立背景光晕色 `glow_color`（`"accent"`=跟随主题色 / 预设 id / `#rrggbb`），`applyGlowToDom` 下发 `--glow-rgb`（原始色，驱动 `--hero-glow`）与 `--glow-deep-rgb`（按感知亮度归一化的深色变体，驱动 app-shell 大气层，防止亮色光晕把暗色主题洗亮）。
+- `theme/` — `ThemeId = "day"(浅,Rust `default_theme` 默认) | "aerospace"(深)`；theme/uiMode/heroStyle 三者均镜像到 localStorage（`index.html` 内联脚本 + Provider 初始 `useState` 同步读取）防 WebView 重建首帧闪烁/误挂 three.js hero；`accents.ts` 6 个主题色，由一个基色派生整个 `--primary*` 变量族（Rec.709 亮度决定 `--on-primary`）。语义色 `--success*` 为固定绿（App.css tokens），**不随主题色**（ok/直连/测速良好语义稳定）；自定义 `#rrggbb` accent 在 `applyAccentToDom` 应用时按主题做亮度钳制（深色提亮 ≥0.5 / 浅色加深 ≤0.6）保证文字对比度，存储仍保留原始 hex。另有独立背景光晕色 `glow_color`（`"accent"`=跟随主题色 / 预设 id / `#rrggbb`），`applyGlowToDom` 下发 `--glow-rgb`（原始色，驱动 `--hero-glow`）与 `--glow-deep-rgb`（按感知亮度归一化的深色变体，驱动 app-shell 大气层，防止亮色光晕把暗色主题洗亮）。
 - 独立模块：`customNodes.ts`（custom 节点客户端侧过滤/排序/分页镜像）、`subscriptionUrl.ts`（URL 规范化去重）、`deepLink.ts`（深链解析→ImportPrefill）、`coreBusy.ts`（全局 busy 深度计数 + `waitForCoreRestart`）、`connectionChanges.ts`（delta 合并纯函数）、`trafficFilter.ts`（all/direct/proxy 分类）、`windowLayout.ts`（窗口尺寸/模式）。
 - `App.css` — 单文件 ~7.6k 行，按 `/* —— 段落 —— */` 横幅分节（tokens → shell → topnav → page → nodes → …）；玻璃材质 = 半透明 rgba + `backdrop-filter` + 左上光源 `::after`；专业窗口固定 960px 宽（网格断点据此调）。
 
@@ -322,6 +327,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 | 加托盘功能 | `src-tauri/src/tray.rs` |
 | 改测速 | `services/latency.rs` + `src/api.ts` testNodesLatency（内核运行时一律走 Clash delay API 经真实代理链路探测；直连 TCP 仅在内核停止/custom 配置/Xray 下回退——TCP 直连只反映可达性，会漏报 REALITY/Vision 这类「TCP 活但代理死」的节点） |
 | 改内核下载/资产 | `core/download.rs` + `core/assets.rs` + `scripts/fetch-bundled-*-<平台>` 脚本 + `tauri.*.conf.json` resources 四处联动 |
+| 打 Windows 便携版 | `scripts/build-windows.ps1 -Bundle portable`（zip 组装逻辑在此脚本；Rust 侧便携行为集中在 `src-tauri/src/portable.rs`，见 §9.19） |
 | 重大架构 / 模块 / 流程变动 | **同步更新本文档对应章节**（规则见 §0） |
 
 ## 8. 构建细节与产物
@@ -352,3 +358,4 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 16. **`.srs` 规则集是 sing-box 专有** — Xray/mihomo 生成器跳过用户自建远程 `.srs` 集（内置 3 条走 geodata 映射）；`srs.rs` decompile 固定用 sing-box 二进制。Xray/mihomo 模式下 RulesPage 的内置 3 条显示为 geodata 来源卡（Xray：matcher + Loyalsoldier dat；mihomo：MetaCubeX mmdb/GeoSite.dat），"更新"走 `refresh_geodata(kind)` 重下 geodata 而非 `.srs`。
 17. **mihomo 特有约定** — ① Clash YAML 配置写 `config/active.yaml`（JSON 系共用 active.json，互不混用）；启动参数 `-f <abs> -d <data>/mihomo`（config 必须绝对路径）。② geodata 在 `<data>/mihomo/`：`Country.mmdb`（MaxMind）+ `GeoSite.dat`（MetaCubeX mrs，**精确大小写**）——与 Xray 的 bin/geosite.dat 同名不同格式绝不能共目录；缺失时 mihomo 自带的下载会经由未启动的代理 dial 而超时，GEOIP/GEOSITE 规则直接让内核退出，故启动前必须 `ensure_mihomo_geodata`。③ 协议面：mihomo（标准 Clash Meta + uTLS）支持 REALITY/Vision 全组合与全部 vmess 传输，仅 Naive/Tor/独立 ShadowTls 与 ss+shadow-tls 组合被 `supports_node` 过滤。④ `find-process-mode` 真实生效，已接 `AppSettings.find_process`（strict/off）。⑤ DNS 支持 `system` 解析器（Local 分类与 dns_final=local 直用）；Windows TUN 用 `bin/wintun.dll`（与 Xray 共用）。⑥ Clash API 全兼容：热切节点/连接监控/delay 测速/智能切换与 sing-box 同款复用（组名恒 `proxy`，kernel 模式它就是 url-test 组）。注意 mihomo 的 `/connections` chains 是完整 `[节点, 组]`（state 里的 "proxy"→当前节点名解析对 mihomo 无害）。
 18. **三内核 DNS 语义对照（改 DNS 时逐项核对，勿看着 mihomo 双池误以为另两个漏了）** — ① 远程 DNS 经代理出站：三内核均已实现（sing-box `detour:"proxy"` / Xray dns-module 经主出站 / mihomo `#proxy` 尾缀；Direct 出站模式例外，均直连）。② 节点域名解析：sing-box 用 `route.default_domain_resolver`（TUN 下=国内明文，非 TUN=系统）；mihomo 用 `proxy-server-nameserver`（国内明文池）；Xray 无等价物但实测未复现问题，出现「切 Xray 后节点解析失败」再加固。③ 双上游池（远程 1.1.1.1+8.8.8.8 DoH 经代理 / 国内 223.5.5.5+114 明文）**仅 mihomo 有**：Clash 池语义是并发查询取最快，备援零成本；sing-box 每条规则只指向单解析器 tag（无竞速机制，加不了）；Xray 多服务器是顺序回退（非竞速），且 DoH 经代理后端点故障率极低，收益趋零——有意为之，不是遗漏。
+19. **Windows 便携版约定（`src-tauri/src/portable.rs`）** — exe 旁存在 `portable.flag` 即便携模式：**exe 目录 = 数据根**（`data/`、`config/`、`bin/`、`logs/`、`mihomo/`、`remote-rule-sets/`、`webview/` 全在 exe 旁，不写 AppData）。① **禁止直连 `app.path().app_data_dir()`**——新增代码一律走 `portable::resolve_app_data_dir(&app)`（存量 4 处泄漏已收敛：`remote_rule_auto.rs`×2、`commands/rules.rs`、`lib.rs::set_ui_mode_pref`）；`AppState.app_data_dir` 锚点在 `lib.rs` setup 早已走便携覆盖。② **WebView2 用户目录必须在两条创建路径同时重定向**：配置窗口经 `portable::patch_context`（启动前把 `windows[].create` 置 false，setup 里 `build_main_window` 用 `.data_directory()` 重建——Tauri 配置窗口先于 setup 创建、且 conf 的 `dataDirectory` 只能锚定在 `%LOCALAPPDATA%`，无法走配置）；托盘重建窗口在 `window_ctrl::show_main`。漏一边会出现双 WebView 档案。③ `resource_dir()` Windows 上恒为 exe 目录，便携 zip 的 `resources/` 布局与安装版一致，`core/paths.rs` 候选链零改动。④ 便携与安装版共用 identifier → single-instance 互斥，不可同时运行；深链 HKCU 每次启动用 `current_exe` 重写（移动目录自愈），开机自启动 Run 键是绝对路径（移动目录后需重开）。⑤ zip 组装在 `build-windows.ps1 -Bundle portable`：`tauri build --no-bundle` 出 exe，resources **按当前生效 conf 的 `bundle.resources` 清单自拷**（与安装包内容自同步，勿在脚本里硬编码文件列表）。

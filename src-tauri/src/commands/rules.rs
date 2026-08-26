@@ -281,9 +281,7 @@ pub async fn list_remote_rule_items(
             })
             .map_err(|error| error.to_string())?;
 
-    let cache_dir = app
-        .path()
-        .app_data_dir()
+    let cache_dir = crate::portable::resolve_app_data_dir(&app)
         .map_err(|error| error.to_string())?
         .join("remote-rule-sets")
         .canonicalize()

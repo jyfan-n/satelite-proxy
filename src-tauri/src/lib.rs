@@ -9,6 +9,7 @@ mod core;
 mod domain;
 mod error;
 mod log_retention;
+mod portable;
 mod proxy;
 mod remote_rule_auto;
 mod rule_apply;
@@ -104,6 +105,11 @@ pub fn run() {
     if let Some(code) = core::manager::try_run_elevated_log_helper() {
         std::process::exit(code);
     }
+    // Portable mode: when `portable.flag` sits next to the exe, disable the
+    // config-window auto-create so setup can rebuild the window with the
+    // WebView2 profile redirected next to the exe (see portable.rs).
+    let mut context = tauri::generate_context!();
+    portable::patch_context(&mut context);
     let mut builder = tauri::Builder::default();
 
     // Single instance + deep-link: second launch (e.g. click clash:// while running)
@@ -120,7 +126,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
-            let dir = match app.path().app_data_dir() {
+            // Portable: config windows were disabled pre-build; recreate them
+            // here with the WebView2 profile next to the exe. Must precede the
+            // silent-start hide and everything that expects the "main" window.
+            if portable::is_portable() {
+                portable::build_main_window(app);
+            }
+            let dir = match portable::resolve_app_data_dir(app.handle()) {
                 Ok(dir) => dir,
                 Err(error) => {
                     show_startup_failure(app, error, None);
@@ -133,6 +145,12 @@ pub fn run() {
             }
             app_log::init(dir.join("logs"));
             app_log::install_panic_hook();
+            if portable::is_portable() {
+                app_log::info(
+                    "app",
+                    format!("portable mode active, data dir: {}", dir.display()),
+                );
+            }
             let resource_dir = app.path().resource_dir().ok();
             let app_state = match AppState::load(dir.clone(), resource_dir) {
                 Ok(state) => state,
@@ -438,7 +456,7 @@ pub fn run() {
             peek_pending_import_urls,
             clear_pending_import_urls,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             match event {
@@ -494,7 +512,7 @@ fn parse_subscription_text(content: String) -> Result<domain::ParseResult, Strin
 /// Persist UI shell preference (pro | simple) for correct window size on recreate.
 #[tauri::command]
 fn set_ui_mode_pref(app: tauri::AppHandle, mode: String) -> Result<(), String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dir = portable::resolve_app_data_dir(&app).map_err(|e| e.to_string())?;
     window_ctrl::write_ui_mode(&dir, &mode);
     Ok(())
 }

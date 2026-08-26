@@ -388,6 +388,43 @@ impl ProxyNode {
     pub fn instance_key(&self) -> String {
         format!("{}|{}", self.identity_key(), self.name)
     }
+
+    /// Ensure node ids are unique on the outbound-tag prefix (`id[..16]`).
+    ///
+    /// `compute_id` hashes `name|server|port|protocol` without credentials,
+    /// while import dedupes by `instance_key` (credentials included) — so
+    /// two same-named nodes that differ only by password/uuid survive as
+    /// distinct instances yet hash to the same id, producing duplicate
+    /// `node-<id[..16]>` outbound/endpoint tags and a `sing-box check`
+    /// failure. Later occurrences are re-hashed with a deterministic salt;
+    /// the first keeps its id (list order persists in the store, so this is
+    /// stable across runs). Returns how many ids were rewritten.
+    pub fn ensure_unique_ids<'a, I>(nodes: I) -> usize
+    where
+        I: Iterator<Item = &'a mut ProxyNode>,
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut renamed = 0;
+        for node in nodes {
+            let mut salt = 1;
+            while !seen.insert(tag_prefix(&node.id)) {
+                salt += 1;
+                node.id = Self::compute_id(
+                    &format!("dup:{}:{salt}", node.id),
+                    &node.server,
+                    node.port,
+                    node.protocol,
+                );
+                renamed += 1;
+            }
+        }
+        renamed
+    }
+}
+
+/// The slice of an id that `outbound_tag` renders into config tags.
+fn tag_prefix(id: &str) -> String {
+    id[..id.len().min(16)].to_string()
 }
 
 fn config_identity(config: &ProtocolConfig) -> String {
@@ -608,4 +645,73 @@ pub struct ManualNodeDraft {
     pub service_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub udp: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ss_node(id: &str, name: &str, password: &str) -> ProxyNode {
+        ProxyNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            protocol: Protocol::Shadowsocks,
+            server: "example.com".into(),
+            port: 8388,
+            tls: None,
+            transport: None,
+            udp: None,
+            config: ProtocolConfig::Shadowsocks {
+                method: "aes-128-gcm".into(),
+                password: password.into(),
+                plugin: None,
+                plugin_opts: None,
+                shadow_tls: None,
+            },
+            source: None,
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    #[test]
+    fn ensure_unique_ids_renames_only_duplicates() {
+        let base = ProxyNode::compute_id("香港 01", "example.com", 8388, Protocol::Shadowsocks);
+        let other = ProxyNode::compute_id("东京 01", "example.com", 8388, Protocol::Shadowsocks);
+        let mut nodes = vec![
+            ss_node(&base, "香港 01", "pass-a"),
+            ss_node(&base, "香港 01", "pass-b"),
+            ss_node(&other, "东京 01", "pass-c"),
+        ];
+
+        let renamed = ProxyNode::ensure_unique_ids(nodes.iter_mut());
+        assert_eq!(renamed, 1);
+        // First occurrence keeps its id; distinct node untouched.
+        assert_eq!(nodes[0].id, base);
+        assert_eq!(nodes[2].id, other);
+        // Duplicate got a different id, distinct on the tag prefix.
+        assert_ne!(nodes[1].id, base);
+        let prefixes: Vec<String> = nodes.iter().map(|n| tag_prefix(&n.id)).collect();
+        let mut unique = prefixes.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(prefixes.len(), unique.len());
+    }
+
+    #[test]
+    fn ensure_unique_ids_is_deterministic() {
+        let base = ProxyNode::compute_id("同号节点", "example.com", 8388, Protocol::Shadowsocks);
+        let build = || {
+            vec![
+                ss_node(&base, "同号节点", "pass-a"),
+                ss_node(&base, "同号节点", "pass-b"),
+            ]
+        };
+        let mut first = build();
+        let mut second = build();
+        ProxyNode::ensure_unique_ids(first.iter_mut());
+        ProxyNode::ensure_unique_ids(second.iter_mut());
+        assert_eq!(first[1].id, second[1].id);
+        assert_ne!(first[0].id, first[1].id);
+    }
 }

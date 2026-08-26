@@ -7,6 +7,7 @@
 use crate::state::AppState;
 use std::fs;
 use std::path::PathBuf;
+use tauri::window::Color;
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 /// Matches frontend `windowLayout.ts` (logical px).
@@ -50,6 +51,24 @@ fn size_for_ui_mode(mode: &str) -> (f64, f64) {
     }
 }
 
+/// Native window background per theme — covers the gap between WebView
+/// creation and the first HTML/CSS paint on the recreate-from-tray path.
+/// Values mirror App.css `--bg` per theme (kept in sync by hand).
+const BG_AEROSPACE: (u8, u8, u8) = (0x11, 0x14, 0x1c);
+const BG_DAY: (u8, u8, u8) = (0xee, 0xf0, 0xf4);
+
+fn theme_bg_color<R: Runtime>(app: &AppHandle<R>) -> Color {
+    let dark = app
+        .try_state::<AppState>()
+        .and_then(|s| {
+            s.with_store(|st| Ok(st.settings.theme.trim().eq_ignore_ascii_case("aerospace")))
+                .ok()
+        })
+        .unwrap_or(false);
+    let (r, g, b) = if dark { BG_AEROSPACE } else { BG_DAY };
+    Color(r, g, b, 255)
+}
+
 /// macOS: show Dock icon (foreground app). No-op on other platforms.
 #[cfg(target_os = "macos")]
 pub fn set_dock_visible<R: Runtime>(app: &AppHandle<R>, visible: bool) {
@@ -89,10 +108,19 @@ pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
             .title("Satelite")
             .inner_size(w, h)
             .fullscreen(false)
+            // Native底色 follows the stored theme so the recreated window
+            // never flashes white before the inline CSS lands.
+            .background_color(theme_bg_color(app))
             // Important on macOS: without activation policy / visible, Dock reopen
             // can recreate a window that never becomes key.
             .visible(true)
             .focused(true);
+        // Portable: keep the WebView2 profile next to the exe — otherwise the
+        // recreated webview silently spawns a second profile in %LOCALAPPDATA%.
+        let builder = match crate::portable::webview_data_dir() {
+            Some(dir) => builder.data_directory(dir),
+            None => builder,
+        };
         // Simple mode: user-resizable strip, shrink-only (frontend restores size).
         let builder = if mode == "simple" {
             builder

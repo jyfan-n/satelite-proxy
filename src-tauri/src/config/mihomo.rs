@@ -82,6 +82,16 @@ pub fn build_mihomo_config(
         ));
     }
 
+    // Same tag space as sing-box (`node-<id[..16]>`): a stored id collision
+    // would emit duplicate proxy names and mihomo refuses the config.
+    let renamed = ProxyNode::ensure_unique_ids(supported.iter_mut());
+    if renamed > 0 {
+        crate::app_log::warn(
+            "mihomo_config",
+            format!("{renamed} 个节点 id 重复，已在生成时改写名称以避免校验失败"),
+        );
+    }
+
     let tags: Vec<String> = supported.iter().map(outbound_tag).collect();
     let selected_tag = resolve_selected_tag(&supported, &tags, opts.current_node_id.as_deref());
 

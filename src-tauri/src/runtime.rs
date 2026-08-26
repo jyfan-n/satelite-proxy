@@ -955,6 +955,8 @@ impl Runtime {
             crate::core::ensure_wintun(app_data_dir, resource_dir, None)?;
         }
 
+        // `mut` is only consumed by the macOS utun pick below.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut xray_opts = build_options(store, String::new());
         #[cfg(target_os = "macos")]
         if store.settings.tun_enabled {
