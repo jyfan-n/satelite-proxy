@@ -77,6 +77,17 @@ impl AppStore {
         store.migrate_system_rule_set_ids();
         store.migrate_file_sources_to_copied_text();
         store.ensure_subscription_enable_policy();
+        // Self-heal legacy stores that already contain colliding node ids
+        // (same name/server/port/protocol, different credentials) — they
+        // produce `duplicate outbound/endpoint tag` at config generation.
+        // Idempotent, so no schema-version gate is needed.
+        let renamed_ids = ProxyNode::ensure_unique_ids(store.nodes.iter_mut().map(|n| &mut n.node));
+        if renamed_ids > 0 {
+            crate::app_log::warn(
+                "storage",
+                format!("检测到 {renamed_ids} 个重复节点 id，已自动改写以避免 tag 冲突"),
+            );
+        }
         if schema_before < 5 && source_raw.is_some() {
             let backup = path.with_file_name("store.pre-v5.backup.json");
             if !backup.exists() {
@@ -1636,6 +1647,47 @@ mod tests {
                     .is_some_and(|name| name.starts_with("store.corrupt-"))
             })
             .collect()
+    }
+
+    #[test]
+    fn load_self_heals_duplicate_node_ids() {
+        use crate::domain::{Protocol, ProtocolConfig, ProxyNode};
+        let mk = |id: &str, password: &str| StoredNode {
+            subscription_id: "sub-1".into(),
+            node: ProxyNode {
+                id: id.into(),
+                name: "香港 01".into(),
+                protocol: Protocol::Shadowsocks,
+                server: "example.com".into(),
+                port: 8388,
+                tls: None,
+                transport: None,
+                udp: None,
+                config: ProtocolConfig::Shadowsocks {
+                    method: "aes-128-gcm".into(),
+                    password: password.into(),
+                    plugin: None,
+                    plugin_opts: None,
+                    shadow_tls: None,
+                },
+                source: None,
+                latency_ms: None,
+                latency_at: None,
+            },
+        };
+        // Legacy collision: same name/server/port/protocol, different creds.
+        let base = ProxyNode::compute_id("香港 01", "example.com", 8388, Protocol::Shadowsocks);
+        let path = test_store_path("dup-ids");
+        let mut store = AppStore::default();
+        store.nodes.push(mk(&base, "pass-a"));
+        store.nodes.push(mk(&base, "pass-b"));
+        store.save(&path).unwrap();
+
+        let loaded = AppStore::load(&path, None).unwrap();
+        assert_eq!(loaded.nodes.len(), 2);
+        assert_ne!(loaded.nodes[0].node.id, loaded.nodes[1].node.id);
+        assert_ne!(loaded.nodes[0].node.id[..16], loaded.nodes[1].node.id[..16]);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

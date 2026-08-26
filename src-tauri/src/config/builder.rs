@@ -96,6 +96,21 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
         ));
     }
 
+    // Last-line defense: stored nodes normally keep unique ids (import and
+    // store-load both normalize), but any surviving collision would emit two
+    // outbounds with the same `node-<id[..16]>` tag and sing-box rejects the
+    // whole config. Work on a normalized copy so every tag reference inside
+    // this build (selector members, route pins, smart pools) stays consistent.
+    let mut owned_nodes = nodes.to_vec();
+    let renamed = ProxyNode::ensure_unique_ids(owned_nodes.iter_mut());
+    if renamed > 0 {
+        crate::app_log::warn(
+            "singbox_config",
+            format!("{renamed} 个节点 id 重复，已在生成时改写 tag 以避免 sing-box 校验失败"),
+        );
+    }
+    let nodes: &[ProxyNode] = &owned_nodes;
+
     let mut node_outbounds = Vec::new();
     let mut node_endpoints = Vec::new();
     let mut tags = Vec::new();
@@ -310,6 +325,39 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
     });
     if !node_endpoints.is_empty() {
         value["endpoints"] = json!(node_endpoints);
+    }
+
+    // Post-build sanity scan: sing-box requires outbound + endpoint tags to
+    // be globally unique. Collisions should be impossible after the entry
+    // normalization; if one ever slips through (e.g. a non-node group tag),
+    // leave a precise trace — the core's `check -c` still rejects it with
+    // the authoritative error.
+    if let Some(outbounds) = value.get("outbounds").and_then(Value::as_array) {
+        let endpoint_tags = value
+            .get("endpoints")
+            .and_then(Value::as_array)
+            .map(|eps| {
+                eps.iter()
+                    .filter_map(|e| e.get("tag").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        let dups: Vec<&str> = outbounds
+            .iter()
+            .filter_map(|o| o.get("tag").and_then(Value::as_str))
+            .chain(endpoint_tags.iter().copied())
+            .filter(|t| !seen.insert(t.to_string()))
+            .collect();
+        if !dups.is_empty() {
+            crate::app_log::error(
+                "singbox_config",
+                format!(
+                    "生成结果存在重复 tag（将由内核校验拦截）: {}",
+                    dups.join(", ")
+                ),
+            );
+        }
     }
 
     Ok(BuiltConfig {
@@ -1440,6 +1488,101 @@ mod tests {
             latency_ms: None,
             latency_at: None,
         }
+    }
+
+    fn sample_wg(id: &str) -> ProxyNode {
+        ProxyNode {
+            id: id.into(),
+            name: "WG-HK".into(),
+            protocol: Protocol::WireGuard,
+            server: "wg.example.com".into(),
+            port: 51820,
+            tls: None,
+            transport: None,
+            udp: None,
+            config: ProtocolConfig::WireGuard {
+                local_address: vec!["172.16.0.2/32".into()],
+                private_key: "priv".into(),
+                peer_public_key: "pub".into(),
+                pre_shared_key: None,
+                reserved: vec![],
+                mtu: None,
+            },
+            source: None,
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    // Regression for `duplicate outbound/endpoint tag: node-xxx`: two nodes
+    // with a colliding id (same name/server/port/protocol, different
+    // credentials) must still build a valid config with distinct tags.
+    #[test]
+    fn colliding_node_ids_yield_unique_outbound_tags() {
+        let opts = || BuildOptions {
+            mixed_port: 2080,
+            allow_lan: false,
+            api_port: 19090,
+            extra_inbounds: vec![],
+            api_secret: "test".into(),
+            current_node_id: None,
+            log_level: "info".into(),
+            rules: vec![],
+            rule_sets: vec![],
+            tun_enabled: false,
+            tun_stack: "mixed".into(),
+            dns: DnsSettings::default(),
+            outbound_mode: OutboundMode::Rule,
+            route_final: "proxy".into(),
+            auto_select: crate::domain::AutoSelectMode::Off,
+            probe_url: "https://www.gstatic.com/generate_204".into(),
+            find_process: true,
+            tun_ipv6: false,
+            block_quic: false,
+            bypass_lan: false,
+            tun_interface_name: None,
+        };
+
+        // Both outbounds.
+        let mut a = sample_ss();
+        let mut b = sample_ss();
+        if let ProtocolConfig::Shadowsocks { password, .. } = &mut b.config {
+            *password = "other-secret".into();
+        }
+        assert_eq!(a.id, b.id, "precondition: ids collide");
+        let built = build_singbox_config(&[a, b], &opts()).unwrap();
+        assert_eq!(built.outbound_tags.len(), 2);
+        assert_ne!(built.outbound_tags[0], built.outbound_tags[1]);
+        let selector = built.value["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "proxy")
+            .expect("proxy selector");
+        let members = selector["outbounds"].as_array().unwrap();
+        assert!(members.contains(&json!(built.outbound_tags[0])));
+        assert!(members.contains(&json!(built.outbound_tags[1])));
+
+        // WireGuard endpoint shares the tag namespace with outbounds — a
+        // colliding id must be disambiguated across both lists too.
+        let ss = sample_ss();
+        let wg = sample_wg(&ss.id);
+        let built = build_singbox_config(&[ss, wg], &opts()).unwrap();
+        assert_eq!(built.outbound_tags.len(), 2);
+        assert_ne!(built.outbound_tags[0], built.outbound_tags[1]);
+        let endpoints = built.value["endpoints"].as_array().expect("endpoints");
+        assert_eq!(endpoints.len(), 1);
+        let endpoint_tag = endpoints[0]["tag"].as_str().unwrap();
+        let outbound_tags: Vec<&str> = built.value["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["tag"].as_str())
+            .collect();
+        assert!(
+            !outbound_tags.contains(&endpoint_tag),
+            "endpoint tag {endpoint_tag} duplicated in outbounds {outbound_tags:?}"
+        );
     }
 
     #[test]

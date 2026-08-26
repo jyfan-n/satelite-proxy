@@ -39,7 +39,7 @@ const DIRECT_DNS_TAG: &str = "direct-dns";
 const NODE_TAG_PREFIX: &str = "node-";
 
 pub fn build_xray_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResult<BuiltConfig> {
-    let supported: Vec<ProxyNode> = nodes
+    let mut supported: Vec<ProxyNode> = nodes
         .iter()
         .filter(|n| CoreKind::Xray.supports(n.protocol))
         .cloned()
@@ -48,6 +48,16 @@ pub fn build_xray_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResult<
         return Err(AppError::Config(
             "no Xray-compatible nodes (supports vmess/vless/shadowsocks/trojan/hysteria2(no obfs)/socks5/http/wireguard)".into(),
         ));
+    }
+
+    // Same tag space as sing-box (`node-<id[..16]>`): a stored id collision
+    // would emit duplicate outbound tags and Xray refuses the config.
+    let renamed = ProxyNode::ensure_unique_ids(supported.iter_mut());
+    if renamed > 0 {
+        crate::app_log::warn(
+            "xray_config",
+            format!("{renamed} 个节点 id 重复，已在生成时改写 tag 以避免校验失败"),
+        );
     }
 
     let mut tags = Vec::new();
