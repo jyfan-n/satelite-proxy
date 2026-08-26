@@ -1578,6 +1578,8 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         log_level: "info".into(),
         rules: store.enabled_rules_sorted(),
         rule_sets: store.enabled_rule_sets(),
+        pools: store.pools.clone(),
+        chains: store.chains.clone(),
         tun_enabled: store.settings.tun_enabled,
         tun_stack: store.settings.tun_stack.clone(),
         dns: store.dns.clone(),

@@ -455,26 +455,31 @@ export interface RuleSetSummary {
   enabled: boolean;
   ownership: "builtin" | "user" | "system";
   strategy: RuleSetStrategy;
-  /** Set-level route parameters (strategy === "node" | "filter"). */
+  /** Set-level route parameters (strategy === "node" | "filter" | "chain"). */
   node_id?: string | null;
   node_name?: string | null;
   smart_include?: string[];
   smart_exclude?: string[];
+  /** When strategy is `chain`: whole-set chain id. */
+  chain_id?: string | null;
+  chain_name?: string | null;
   dns_strategy: RuleSetDnsStrategy;
   /** Restorable by Reset: only the bundled remote rule sets. */
   resettable: boolean;
   remote?: RemoteRuleSetConfig | null;
 }
 
-/** Whole-set route strategies. `node` (pinned node) and `filter`
- *  (keyword-filtered pool) are whole-set pins whose parameters live on the
- *  set level; `smart` (Mixed) keeps per-rule decisions. */
+/** Whole-set route strategies. `node` (pinned node), `filter`
+ *  (keyword-filtered pool), and `chain` (multi-hop chain) are whole-set pins
+ *  whose parameters live on the set level; `smart` (Mixed) keeps per-rule
+ *  decisions. */
 export type RuleSetStrategy =
   | "proxy"
   | "direct"
   | "block"
   | "node"
   | "filter"
+  | "chain"
   | "smart";
 export type RuleSetDnsStrategy = "local" | "domestic" | "remote";
 
@@ -523,13 +528,17 @@ export interface RuleSet {
   smart_include?: string[];
   /** When strategy is `filter`: blacklist keywords (OR). */
   smart_exclude?: string[];
+  /** When strategy is `chain`: whole-set chain id. */
+  chain_id?: string | null;
+  /** Snapshot name at pin time (stale UI when id missing). */
+  chain_name?: string | null;
   dns_strategy: RuleSetDnsStrategy;
   remote?: RemoteRuleSetConfig | null;
   dns_rules: DnsRule[];
   rules: Rule[];
 }
 
-export type RuleTarget = "direct" | "proxy" | "block" | "node" | "smart";
+export type RuleTarget = "direct" | "proxy" | "block" | "node" | "smart" | "chain";
 
 export interface Rule {
   id: string;
@@ -546,6 +555,39 @@ export interface Rule {
   smart_include?: string[];
   /** Smart mode blacklist: name containing any keyword is skipped (OR). */
   smart_exclude?: string[];
+  /** When target is `chain`: chain id to route through. */
+  chain_id?: string | null;
+  /** Snapshot name at save time (stale UI when id missing). */
+  chain_name?: string | null;
+}
+
+/** How a [[NodePool]] selects its member nodes. */
+export type PoolMode =
+  | { mode: "explicit"; node_ids: string[] }
+  | { mode: "keyword"; include: string[]; exclude: string[] };
+
+/** Named, reusable node pool — referenced by chain hops and by
+ *  Rule/RuleSet `chain` targets (via the chain's hops), so multiple
+ *  chains can share one pool definition. */
+export interface NodePool {
+  id: string;
+  name: string;
+  mode: PoolMode;
+}
+
+/** One hop in a [[ProxyChain]] — either a single pinned node or a pool
+ *  (resolved to that pool's selector/urltest outbound at build time). */
+export type ChainHop =
+  | { kind: "node"; node_id: string }
+  | { kind: "pool"; pool_id: string };
+
+/** Named, ordered chain of hops, entry point first. Built into a sing-box
+ *  `detour` chain: hop[0]'s outbound detours into hop[1], hop[1] into
+ *  hop[2], … the last hop exits directly. Must have at least 2 hops. */
+export interface ProxyChain {
+  id: string;
+  name: string;
+  hops: ChainHop[];
 }
 
 /** Live connection or historical request row */

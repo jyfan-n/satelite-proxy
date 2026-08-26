@@ -464,7 +464,10 @@ fn rule_to_mihomo(
     let target = match target {
         RuleTarget::Direct => "DIRECT".to_string(),
         RuleTarget::Block => "REJECT".to_string(),
-        RuleTarget::Proxy => main_target.to_string(),
+        // Clash/mihomo has no `detour` chain concept — Chain routing is a
+        // sing-box-only feature (see builder.rs). Degrade to the main group,
+        // same as an empty Smart pool.
+        RuleTarget::Proxy | RuleTarget::Chain => main_target.to_string(),
         RuleTarget::Smart => smart_group_tags
             .get(&rule.id)
             .cloned()
@@ -1161,6 +1164,8 @@ mod tests {
             log_level: "info".into(),
             rules: Vec::new(),
             rule_sets: Vec::new(),
+            pools: Vec::new(),
+            chains: Vec::new(),
             tun_enabled: false,
             tun_stack: "mixed".into(),
             dns: DnsSettings::default(),

@@ -41,12 +41,13 @@ import type {
   ThemeId,
 } from "../types";
 import { RulesPage } from "./RulesPage";
+import { ChainPage } from "./ChainPage";
 import { DnsPage } from "./DnsPage";
 import { HostsPage } from "./HostsPage";
 
-type SettingsTab = "app" | "ports" | "rules" | "dns" | "hosts" | "core";
+type SettingsTab = "app" | "ports" | "rules" | "chain" | "dns" | "hosts" | "core";
 
-const CUSTOM_BLOCKED_TABS = new Set(["rules", "dns", "hosts"]);
+const CUSTOM_BLOCKED_TABS = new Set(["rules", "chain", "dns", "hosts"]);
 
 /** Repository link shown in the bottom-right corner of the settings page. */
 const PROJECT_URL = "https://github.com/zn0wii/satelite-proxy/";
@@ -193,6 +194,11 @@ export function SettingsPage() {
           id: "rules" as const,
           label: t("settings.tabRules"),
           hint: t("settings.hintRules"),
+        },
+        {
+          id: "chain" as const,
+          label: t("settings.tabChain"),
+          hint: t("settings.hintChain"),
         },
         {
           id: "dns" as const,
@@ -875,6 +881,7 @@ export function SettingsPage() {
           customRuntime
             ? {
                 rules: t("config.customDisabled"),
+                chain: t("config.customDisabled"),
                 dns: t("config.customDisabled"),
                 hosts: t("config.customDisabled"),
               }
@@ -885,6 +892,7 @@ export function SettingsPage() {
 
       {error &&
         visibleTab !== "rules" &&
+        visibleTab !== "chain" &&
         visibleTab !== "dns" &&
         visibleTab !== "hosts" && (
         <ErrorModal message={error} onClose={() => setError(null)} />
@@ -899,7 +907,7 @@ export function SettingsPage() {
               ? " settings-ports-page"
               : ""
         }${
-          visibleTab === "rules" || visibleTab === "dns"
+          visibleTab === "rules" || visibleTab === "chain" || visibleTab === "dns"
             ? " settings-scroll-embed"
             : ""
         }`}
@@ -907,6 +915,7 @@ export function SettingsPage() {
       >
         {!customRuntime && visibleTab === "rules" && <RulesPage embedded />}
 
+        {!customRuntime && visibleTab === "chain" && <ChainPage embedded />}
         {!customRuntime && visibleTab === "dns" && (
           <DnsPage embedded />
         )}

@@ -427,7 +427,10 @@ fn rule_to_xray(
     let outbound = match target {
         RuleTarget::Direct => "direct".to_string(),
         RuleTarget::Block => "block".to_string(),
-        RuleTarget::Proxy | RuleTarget::Smart => main_target.to_string(),
+        // Xray has no `detour` chain concept — Chain routing is a
+        // sing-box-only feature (see config/builder.rs). Degrade to the main
+        // target, same as an empty Smart pool.
+        RuleTarget::Proxy | RuleTarget::Smart | RuleTarget::Chain => main_target.to_string(),
         RuleTarget::Node => {
             let pinned = node_id
                 .as_deref()
@@ -1188,6 +1191,8 @@ mod tests {
             log_level: "info".into(),
             rules: Vec::new(),
             rule_sets: Vec::new(),
+            pools: Vec::new(),
+            chains: Vec::new(),
             tun_enabled: false,
             tun_stack: "mixed".into(),
             dns: DnsSettings::default(),

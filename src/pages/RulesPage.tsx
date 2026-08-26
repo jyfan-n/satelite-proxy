@@ -16,6 +16,7 @@ import {
   getRuleSet,
   getSettings,
   listAllNodes,
+  listChains,
   listRemoteRuleItems,
   listRuleSets,
   peekSettings,
@@ -42,6 +43,7 @@ import { ErrorModal } from "../components/ErrorModal";
 import { useI18n } from "../i18n";
 import { extractDomainSuffix } from "./FailuresPage";
 import type {
+  ProxyChain,
   ProxyNode,
   Rule,
   RuleSetDnsStrategy,
@@ -145,6 +147,8 @@ export function RulesPage({ embedded = false }: Props) {
   const [nodeQuery, setNodeQuery] = useState("");
   const [smartInclude, setSmartInclude] = useState("");
   const [smartExclude, setSmartExclude] = useState("");
+  const [chainId, setChainId] = useState<string>("");
+  const [chains, setChains] = useState<ProxyChain[]>([]);
   const [nodes, setNodes] = useState<ProxyNode[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -155,12 +159,13 @@ export function RulesPage({ embedded = false }: Props) {
   const [newSetKind, setNewSetKind] = useState<"local" | "remote">("local");
   const [newSetUrl, setNewSetUrl] = useState("");
   const [newSetTarget, setNewSetTarget] = useState<
-    "proxy" | "direct" | "block" | "node" | "filter"
+    "proxy" | "direct" | "block" | "node" | "filter" | "chain"
   >("proxy");
   const [newSetNodeId, setNewSetNodeId] = useState("");
   const [newSetNodeQuery, setNewSetNodeQuery] = useState("");
   const [newSetSmartInclude, setNewSetSmartInclude] = useState("");
   const [newSetSmartExclude, setNewSetSmartExclude] = useState("");
+  const [newSetChainId, setNewSetChainId] = useState("");
   const [newSetUpdateInterval, setNewSetUpdateInterval] = useState<
     "disabled" | "1h" | "12h" | "24h"
   >("disabled");
@@ -198,6 +203,7 @@ export function RulesPage({ embedded = false }: Props) {
   const [batchNodeQuery, setBatchNodeQuery] = useState("");
   const [batchSmartInclude, setBatchSmartInclude] = useState("");
   const [batchSmartExclude, setBatchSmartExclude] = useState("");
+  const [batchChainId, setBatchChainId] = useState("");
 
   const setsRef = useRef(sets);
   setsRef.current = sets;
@@ -419,6 +425,12 @@ export function RulesPage({ embedded = false }: Props) {
     return m;
   }, [nodes]);
 
+  const chainById = useMemo(() => {
+    const m = new Map<string, ProxyChain>();
+    for (const c of chains) m.set(c.id, c);
+    return m;
+  }, [chains]);
+
   const filteredNodes = useMemo(() => {
     const q = nodeQuery.trim().toLowerCase();
     if (!q) return nodes;
@@ -627,6 +639,7 @@ export function RulesPage({ embedded = false }: Props) {
       { value: "block", label: t("rules.targetBlock") },
       { value: "node", label: t("rules.targetNode") },
       { value: "smart", label: t("rules.targetSmart") },
+      { value: "chain", label: t("rules.targetChain") },
     ],
     [t],
   );
@@ -670,7 +683,9 @@ export function RulesPage({ embedded = false }: Props) {
             ? t("rules.strategyNode")
             : s === "filter"
               ? t("rules.strategyFilter")
-              : t("rules.strategySmart");
+              : s === "chain"
+                ? t("rules.targetChain")
+                : t("rules.strategySmart");
   }
 
   function dnsStrategyLabel(s: string): string {
@@ -719,6 +734,19 @@ export function RulesPage({ embedded = false }: Props) {
       }
       return { text: parts.join(" · "), stale: false, cls: "target-smart" };
     }
+    if (r.target === "chain") {
+      const id = r.chain_id ?? "";
+      const live = id ? chainById.get(id) : undefined;
+      if (live) {
+        return { text: live.name, stale: false, cls: "target-chain" };
+      }
+      const was = r.chain_name?.trim() || id || "—";
+      return {
+        text: t("rules.chainStaleLabel", { name: was }),
+        stale: true,
+        cls: "target-stale",
+      };
+    }
     if (r.target !== "node") {
       const text =
         r.target === "proxy"
@@ -752,6 +780,15 @@ export function RulesPage({ embedded = false }: Props) {
     }
   }
 
+  async function ensureChainsLoaded() {
+    try {
+      const list = await listChains();
+      setChains(list);
+    } catch {
+      setChains([]);
+    }
+  }
+
   function openCreate() {
     setEditRule(null);
     setRuleType("domain_suffix");
@@ -763,9 +800,11 @@ export function RulesPage({ embedded = false }: Props) {
     setNodeQuery("");
     setSmartInclude("");
     setSmartExclude("");
+    setChainId("");
     setEnabled(true);
     setEditOpen(true);
     void ensureNodesLoaded();
+    void ensureChainsLoaded();
   }
 
   function openEdit(r: Rule) {
@@ -777,9 +816,11 @@ export function RulesPage({ embedded = false }: Props) {
     setNodeQuery("");
     setSmartInclude((r.smart_include ?? []).join(" "));
     setSmartExclude((r.smart_exclude ?? []).join(" "));
+    setChainId(r.chain_id ?? "");
     setEnabled(r.enabled);
     setEditOpen(true);
     void ensureNodesLoaded();
+    void ensureChainsLoaded();
   }
 
   async function onSave(e: FormEvent) {
@@ -798,6 +839,10 @@ export function RulesPage({ embedded = false }: Props) {
       );
       return;
     }
+    if (effectiveTarget === "chain" && !chainId.trim()) {
+      setError(t("rules.needChain"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -812,6 +857,7 @@ export function RulesPage({ embedded = false }: Props) {
         nodeId: effectiveTarget === "node" ? pinNodeId : null,
         smartInclude: effectiveTarget === "smart" ? parseKeywords(smartInclude) : null,
         smartExclude: effectiveTarget === "smart" ? parseKeywords(smartExclude) : null,
+        chainId: effectiveTarget === "chain" ? chainId : null,
       });
       setEditOpen(false);
       await reloadRules(viewSetId);
@@ -904,8 +950,10 @@ export function RulesPage({ embedded = false }: Props) {
     setBatchNodeQuery("");
     setBatchSmartInclude("");
     setBatchSmartExclude("");
+    setBatchChainId("");
     setBatchOpen(true);
     void ensureNodesLoaded();
+    void ensureChainsLoaded();
   }
 
   async function onBatchApply(e: FormEvent) {
@@ -921,6 +969,10 @@ export function RulesPage({ embedded = false }: Props) {
       );
       return;
     }
+    if (batchTarget === "chain" && !batchChainId.trim()) {
+      setError(t("rules.needChain"));
+      return;
+    }
     setBatchBusy(true);
     setError(null);
     try {
@@ -930,6 +982,7 @@ export function RulesPage({ embedded = false }: Props) {
         batchTarget === "node" ? batchNodeId : null,
         batchTarget === "smart" ? parseKeywords(batchSmartInclude) : null,
         batchTarget === "smart" ? parseKeywords(batchSmartExclude) : null,
+        batchTarget === "chain" ? batchChainId : null,
       );
       setBatchOpen(false);
       await Promise.all([reloadSets(), reloadRules(viewSetId)]);
@@ -964,10 +1017,12 @@ export function RulesPage({ embedded = false }: Props) {
     setNewSetNodeQuery("");
     setNewSetSmartInclude("");
     setNewSetSmartExclude("");
+    setNewSetChainId("");
     setNewSetUpdateInterval("disabled");
     setNewSetOpen(true);
     setError(null);
     void ensureNodesLoaded();
+    void ensureChainsLoaded();
   }
 
   async function onCreateSet(e: FormEvent) {
@@ -979,6 +1034,10 @@ export function RulesPage({ embedded = false }: Props) {
     }
     if (newSetTarget === "node" && !newSetNodeId.trim()) {
       setError(t("rules.needNode"));
+      return;
+    }
+    if (newSetTarget === "chain" && !newSetChainId.trim()) {
+      setError(t("rules.needChain"));
       return;
     }
     if (newSetKeywordOverlap.length > 0) {
@@ -1004,6 +1063,7 @@ export function RulesPage({ embedded = false }: Props) {
         newSetTarget === "node" ? newSetNodeId : null,
         newSetTarget === "filter" ? parseKeywords(newSetSmartInclude) : null,
         newSetTarget === "filter" ? parseKeywords(newSetSmartExclude) : null,
+        newSetTarget === "chain" ? newSetChainId : null,
       );
       const list = await listRuleSets();
       setSets(list);
@@ -1960,6 +2020,29 @@ export function RulesPage({ embedded = false }: Props) {
                   )}
                 </div>
               )}
+              {batchTarget === "chain" && (
+                <div className="field rule-chain-pick">
+                  <span>{t("rules.pickChain")}</span>
+                  {chains.length === 0 ? (
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                      {t("rules.noChains")}
+                    </p>
+                  ) : (
+                    <SolidSelect
+                      value={batchChainId}
+                      onChange={setBatchChainId}
+                      aria-label={t("rules.pickChain")}
+                      options={[
+                        { value: "", label: t("rules.needChain") },
+                        ...chains.map((c) => ({
+                          value: c.id,
+                          label: c.name,
+                        })),
+                      ]}
+                    />
+                  )}
+                </div>
+              )}
               <div className="muted" style={{ fontSize: 12 }}>
                 {t("rules.batchStrategyPreview", {
                   s:
@@ -1967,7 +2050,9 @@ export function RulesPage({ embedded = false }: Props) {
                       ? t("rules.strategyNode")
                       : batchTarget === "smart"
                         ? t("rules.strategyFilter")
-                        : strategyLabel(batchTarget),
+                        : batchTarget === "chain"
+                          ? t("rules.targetChain")
+                          : strategyLabel(batchTarget),
                 })}
               </div>
               <footer className="modal-footer">
@@ -1980,7 +2065,8 @@ export function RulesPage({ embedded = false }: Props) {
                   disabled={
                     batchBusy ||
                     (!viewSet.remote && rules.length === 0) ||
-                    (batchTarget === "node" && !batchNodeId.trim())
+                    (batchTarget === "node" && !batchNodeId.trim()) ||
+                    (batchTarget === "chain" && !batchChainId.trim())
                   }
                 >
                   {batchBusy
@@ -2161,6 +2247,44 @@ export function RulesPage({ embedded = false }: Props) {
                   )}
                 </div>
               )}
+              {viewSet?.strategy === "smart" && target === "chain" && (
+                <div className="field rule-chain-pick">
+                  <span>{t("rules.pickChain")}</span>
+                  {chains.length === 0 ? (
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                      {t("rules.noChains")}
+                    </p>
+                  ) : (
+                    <SolidSelect
+                      value={chainId}
+                      onChange={setChainId}
+                      aria-label={t("rules.pickChain")}
+                      options={[
+                        { value: "", label: t("rules.needChain") },
+                        ...(chainId && !chainById.has(chainId)
+                          ? [
+                              {
+                                value: chainId,
+                                label: t("rules.chainStaleLabel", {
+                                  name: editRule?.chain_name ?? chainId,
+                                }),
+                              },
+                            ]
+                          : []),
+                        ...chains.map((c) => ({
+                          value: c.id,
+                          label: c.name,
+                        })),
+                      ]}
+                    />
+                  )}
+                  {chainId && !chainById.has(chainId) && (
+                    <p className="banner error" style={{ margin: "8px 0 0" }}>
+                      {t("rules.chainStaleHint")}
+                    </p>
+                  )}
+                </div>
+              )}
               {viewSet?.strategy === "filter" && target === "smart" && (
                 <p className="muted" style={{ margin: "0 0 8px", fontSize: 12 }}>
                   {t("rules.editorFilterInheritHint", {
@@ -2267,7 +2391,7 @@ export function RulesPage({ embedded = false }: Props) {
                   ariaLabel={t("rules.routeStrategyAria")}
                   onChange={(value) =>
                     setNewSetTarget(
-                      value as "proxy" | "direct" | "block" | "node" | "filter",
+                      value as "proxy" | "direct" | "block" | "node" | "filter" | "chain",
                     )
                   }
                   options={[
@@ -2276,6 +2400,7 @@ export function RulesPage({ embedded = false }: Props) {
                     { value: "block", label: t("rules.targetBlock") },
                     { value: "node", label: t("rules.strategyNode") },
                     { value: "filter", label: t("rules.strategyFilter") },
+                    { value: "chain", label: t("rules.targetChain") },
                   ]}
                 />
               </label>
@@ -2315,6 +2440,29 @@ export function RulesPage({ embedded = false }: Props) {
                         ]}
                       />
                     </>
+                  )}
+                </div>
+              )}
+              {newSetTarget === "chain" && (
+                <div className="field rule-chain-pick">
+                  <span>{t("rules.pickChain")}</span>
+                  {chains.length === 0 ? (
+                    <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                      {t("rules.noChains")}
+                    </p>
+                  ) : (
+                    <SolidSelect
+                      value={newSetChainId}
+                      onChange={setNewSetChainId}
+                      aria-label={t("rules.pickChain")}
+                      options={[
+                        { value: "", label: t("rules.needChain") },
+                        ...chains.map((c) => ({
+                          value: c.id,
+                          label: c.name,
+                        })),
+                      ]}
+                    />
                   )}
                 </div>
               )}

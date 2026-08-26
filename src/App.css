@@ -63,6 +63,7 @@
   --accent-cyan: #4da7be;
   --accent-yellow: #c6a25f;
   --accent-green: #55c89a;
+  --accent-purple: #9a83e0;
   /* Directional traffic colors — static, never follow the accent preset.
      Green ↓ = download (inbound), red ↑ = upload (outbound). */
   --download: #3fb37f;
@@ -140,6 +141,7 @@
   --accent-cyan: #2a8a9e;
   --accent-yellow: #a67c2a;
   --accent-green: #1f9a72;
+  --accent-purple: #7358c0;
   /* Directional traffic colors — static, never follow the accent preset.
      Green ↓ = download (inbound), red ↑ = upload (outbound). */
   --download: #2f9e6b;
@@ -2517,6 +2519,17 @@ button.node-card:disabled,
 .pill.target-smart {
   background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
   color: var(--accent-blue);
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+.pill.target-chain {
+  background: color-mix(in srgb, var(--accent-purple) 14%, transparent);
+  color: var(--accent-purple);
   max-width: 18rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8254,3 +8267,286 @@ li.virt-pad {
   padding: 0;
   border: none;
 }
+
+/* ---- Chain page (node pools + multi-hop chains) ------------------------ */
+
+.chain-section {
+  margin-bottom: 1.5rem;
+}
+
+.chain-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+.chain-section-head h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chain-pool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.chain-pool-card {
+  padding: 0.85rem 1rem;
+}
+
+.chain-pool-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.chain-pool-name {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-pool-summary {
+  margin: 0 0 0.6rem;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-pool-card-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.chain-pool-node-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 0.5rem;
+}
+
+.chain-pool-node-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.chain-pool-node-item:last-child {
+  border-bottom: none;
+}
+
+.chain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.chain-card {
+  padding: 0.85rem 1rem;
+}
+
+.chain-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.chain-card-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chain-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.chain-card-hops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+}
+
+.chain-hop-chip-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.chain-hop-chip {
+  background: color-mix(in srgb, var(--accent-purple) 14%, transparent);
+  color: var(--accent-purple);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+}
+
+.chain-hop-chip.stale {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.chain-hop-arrow {
+  color: var(--muted);
+}
+
+/* xyflow custom node: same glass-capsule language as .pill/.chip elsewhere. */
+.chain-hop-node {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  white-space: nowrap;
+}
+
+.chain-hop-node.stale {
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.chain-editor-modal {
+  width: min(1000px, 92vw);
+  max-width: 1000px;
+}
+
+.chain-editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.chain-editor-hint {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.chain-editor-layout {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 0.75rem;
+  height: 420px;
+  min-height: 0;
+}
+
+.chain-editor-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.chain-candidate-list {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  padding: 0.3rem;
+  gap: 0.25rem;
+}
+
+.chain-candidate-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  cursor: grab;
+  user-select: none;
+  /* Pointer-based drag (App.tsx ChainFlowEditor): without this, WKWebView's
+     built-in touch/scroll gesture handling can swallow the pointer sequence
+     before pointermove/pointerup ever fire. */
+  touch-action: none;
+}
+
+.chain-candidate-item:active {
+  cursor: grabbing;
+}
+
+.chain-candidate-item:hover {
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+}
+
+/* Cursor-following label shown while dragging a candidate onto the canvas
+   (see ChainFlowEditor's pointer-event drag implementation). Fixed to the
+   viewport, not the modal, since dragging can cross the canvas boundary. */
+.chain-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--accent-purple);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  white-space: nowrap;
+}
+
+.chain-editor-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-canvas, var(--bg));
+}
+
+/* xyflow ships its own light-only default theme; repaint the essentials to
+   follow the app's dark/light tokens instead of the library's white canvas. */
+.chain-editor-canvas .react-flow__background {
+  background: var(--bg-canvas, var(--bg));
+}
+
+.chain-editor-canvas .react-flow__edge-path {
+  stroke: var(--accent-purple);
+  stroke-width: 2;
+}
+
+.chain-editor-canvas .react-flow__controls {
+  box-shadow: var(--shadow-card);
+}
+
+.chain-editor-canvas .react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  fill: var(--text);
+}
+
+.chain-editor-canvas .react-flow__controls-button:hover {
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+}
+
+.chain-editor-name-field {
+  padding: 1rem 1rem 0;
+}
+
+

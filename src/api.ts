@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  ChainHop,
   CoreDownloadResult,
   CoreInfo,
   CoreKind,
@@ -8,6 +9,9 @@ import type {
   ImportResult,
   LatencyBatchResult,
   ConnectionView,
+  NodePool,
+  PoolMode,
+  ProxyChain,
   ProxyNode,
   ProxyStatus,
   Rule,
@@ -618,6 +622,7 @@ export function createRuleSet(
   nodeId?: string | null,
   smartInclude?: string[] | null,
   smartExclude?: string[] | null,
+  chainId?: string | null,
 ) {
   return invoke<RuleSet>("create_rule_set", {
     name,
@@ -627,6 +632,7 @@ export function createRuleSet(
     nodeId: nodeId ?? null,
     smartInclude: smartInclude ?? null,
     smartExclude: smartExclude ?? null,
+    chainId: chainId ?? null,
   });
 }
 
@@ -651,10 +657,11 @@ export function updateRuleSet(
 /** Apply one target to every rule of a local set (batch set-routes). */
 export function batchSetRuleTargets(
   id: string,
-  target: "proxy" | "direct" | "block" | "node" | "smart",
+  target: "proxy" | "direct" | "block" | "node" | "smart" | "chain",
   nodeId?: string | null,
   smartInclude?: string[] | null,
   smartExclude?: string[] | null,
+  chainId?: string | null,
 ) {
   return invoke<RuleSet>("batch_set_rule_targets", {
     id,
@@ -662,6 +669,7 @@ export function batchSetRuleTargets(
     nodeId: nodeId ?? null,
     smartInclude: smartInclude ?? null,
     smartExclude: smartExclude ?? null,
+    chainId: chainId ?? null,
   });
 }
 
@@ -713,6 +721,7 @@ export function saveRule(input: {
   nodeId?: string | null;
   smartInclude?: string[] | null;
   smartExclude?: string[] | null;
+  chainId?: string | null;
 }) {
   return invoke<Rule>("save_rule", {
     input: {
@@ -726,6 +735,7 @@ export function saveRule(input: {
       node_id: input.nodeId ?? null,
       smart_include: input.smartInclude ?? null,
       smart_exclude: input.smartExclude ?? null,
+      chain_id: input.chainId ?? null,
     },
   });
 }
@@ -740,6 +750,40 @@ export function setRuleEnabled(id: string, enabled: boolean, setId?: string | nu
     enabled,
     setId: setId ?? null,
   });
+}
+
+// ---- Proxy Chain: node pools + multi-hop chains --------------------------
+
+export function listPools() {
+  return invoke<NodePool[]>("list_pools");
+}
+
+export function createPool(name: string, mode: PoolMode) {
+  return invoke<NodePool>("create_pool", { name, mode });
+}
+
+export function updatePool(id: string, name: string, mode: PoolMode) {
+  return invoke<NodePool>("update_pool", { id, name, mode });
+}
+
+export function deletePool(id: string) {
+  return invoke<void>("delete_pool", { id });
+}
+
+export function listChains() {
+  return invoke<ProxyChain[]>("list_chains");
+}
+
+export function createChain(name: string, hops: ChainHop[]) {
+  return invoke<ProxyChain>("create_chain", { name, hops });
+}
+
+export function updateChain(id: string, name: string, hops: ChainHop[]) {
+  return invoke<ProxyChain>("update_chain", { id, name, hops });
+}
+
+export function deleteChain(id: string) {
+  return invoke<void>("delete_chain", { id });
 }
 
 export function listConnections() {

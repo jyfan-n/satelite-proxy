@@ -630,7 +630,7 @@ pub async fn generate_singbox_config(
 ) -> Result<GenerateConfigResult, String> {
     let app_data_dir = state.app_data_dir.clone();
 
-    let (nodes, settings, rules, remote_rule_sets, dns) = state
+    let (nodes, settings, rules, remote_rule_sets, dns, pools, chains) = state
         .with_store(|store| {
             Ok((
                 store.enabled_nodes(),
@@ -638,6 +638,8 @@ pub async fn generate_singbox_config(
                 store.enabled_rules_sorted(),
                 store.enabled_rule_sets(),
                 store.dns.clone(),
+                store.pools.clone(),
+                store.chains.clone(),
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -662,6 +664,8 @@ pub async fn generate_singbox_config(
             log_level: "info".into(),
             rules,
             rule_sets: remote_rule_sets,
+            pools,
+            chains,
             tun_enabled: settings.tun_enabled,
             tun_stack: settings.tun_stack.clone(),
             dns,
@@ -750,7 +754,7 @@ pub fn get_active_config_path(state: State<'_, AppState>) -> Result<Option<Strin
 pub async fn preview_singbox_config(
     state: State<'_, AppState>,
 ) -> Result<GenerateConfigResult, String> {
-    let (nodes, settings, rules, remote_rule_sets, dns) = state
+    let (nodes, settings, rules, remote_rule_sets, dns, pools, chains) = state
         .with_store(|store| {
             Ok((
                 store.enabled_nodes(),
@@ -758,6 +762,8 @@ pub async fn preview_singbox_config(
                 store.enabled_rules_sorted(),
                 store.enabled_rule_sets(),
                 store.dns.clone(),
+                store.pools.clone(),
+                store.chains.clone(),
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -783,6 +789,8 @@ pub async fn preview_singbox_config(
             log_level: "info".into(),
             rules,
             rule_sets: remote_rule_sets,
+            pools,
+            chains,
             tun_enabled: settings.tun_enabled,
             tun_stack: settings.tun_stack.clone(),
             dns,
