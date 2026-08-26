@@ -228,15 +228,86 @@ pub fn ensure_core_setuid(core: &Path) -> AppResult<()> {
     }
 
     if !core_has_setuid(core) {
-        return Err(AppError::Core(
-            "管理员授权已完成，但 sing-box 仍非 setuid root:admin。\
-             请确认路径可写且未被安全软件还原权限。"
-                .into(),
-        ));
+        let hint = diagnose_setuid_failure(core);
+        return Err(AppError::Core(format!(
+            "管理员授权已完成，但 sing-box 仍非 setuid root:admin。{hint}"
+        )));
     }
 
     crate::app_log::info("auth", "sing-box setuid ok");
     Ok(())
+}
+
+/// Best-effort root cause for a chown/chmod that reported success but didn't
+/// stick: checks the volume's "ignore ownership" setting and `nosuid` mount
+/// option, both of which let chown/chmod return 0 while the bits are dropped.
+fn diagnose_setuid_failure(core: &Path) -> String {
+    let mount_point = Command::new("df")
+        .args(["-P", "--"])
+        .arg(core)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.lines().last().and_then(|line| {
+                line.split_whitespace().last().map(str::to_string)
+            })
+        });
+
+    let Some(mount_point) = mount_point else {
+        return "请确认路径可写且未被安全软件还原权限。".into();
+    };
+
+    // "Ignore ownership on this volume" makes chown report success without
+    // persisting root:admin — the classic false-positive for this check.
+    let ignores_ownership = Command::new("diskutil")
+        .args(["info", &mount_point])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().any(|l| {
+                l.trim_start().starts_with("Owners:") && l.contains("Disabled")
+            })
+        })
+        .unwrap_or(false);
+    if ignores_ownership {
+        return format!(
+            "所在磁盘卷「{mount_point}」已开启「忽略所有权」（Ignore ownership），\
+             chown 会静默失败。请在「磁盘工具」中取消该卷的忽略所有权设置，或将程序数据目录\
+             迁移到系统盘（如 ~/Library/Application Support）后重试。"
+        );
+    }
+
+    // nosuid mount silently drops the setuid bit at exec time; chmod itself
+    // still returns 0, so this also passes the write-error check above.
+    let nosuid = Command::new("mount")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().any(|l| {
+                l.contains(&format!(" on {mount_point} ")) && l.contains("nosuid")
+            })
+        })
+        .unwrap_or(false);
+    if nosuid {
+        return format!(
+            "所在磁盘卷「{mount_point}」以 nosuid 方式挂载，setuid 位会被系统忽略。\
+             请将程序数据目录迁移到系统盘（如 ~/Library/Application Support）后重试。"
+        );
+    }
+
+    format!(
+        "所在磁盘卷「{mount_point}」权限设置正常，仍可能被安全软件（如权限管理/杀毒工具）\
+         还原了权限，或该卷不支持 setuid。建议将程序数据目录迁移到系统盘后重试。"
+    )
 }
 
 /// Remove a root-owned setuid core so the user can replace it (core update).

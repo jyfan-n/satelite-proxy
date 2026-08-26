@@ -9,6 +9,8 @@ pub mod kind;
 mod macos_auth;
 #[cfg(target_os = "macos")]
 pub mod macos_net;
+#[cfg(target_os = "macos")]
+pub use macos_auth::{core_has_setuid, ensure_core_setuid};
 pub mod manager;
 mod memory;
 mod paths;

@@ -162,6 +162,51 @@ pub struct Runtime {
     core_memory_cache: Option<(u32, u64, Option<bool>, Instant)>,
 }
 
+/// Whether the *next* `start_proxy`/`restart_core` call for `store`'s current
+/// settings would need macOS setuid elevation, and on which binary.
+///
+/// Read-only mirror of the `elevated` branches inside `start_xray_proxy` /
+/// `start_mihomo_proxy` / the inline sing-box path / `start_custom_proxy`.
+/// Callers use this to run `macos_auth::ensure_core_setuid` (which can block
+/// for seconds on a Touch ID / password prompt) *before* taking the
+/// runtime/store locks, so a slow or stalled system auth dialog can't hold
+/// those locks and freeze every other command that needs them.
+///
+/// Returns `None` when no elevation is needed, or it is already granted
+/// (`macos_auth::core_has_setuid` — cheap `stat`, safe to call here too).
+#[cfg(target_os = "macos")]
+pub fn resolve_pending_elevation(
+    app_data_dir: &Path,
+    resource_dir: Option<&Path>,
+    store: &AppStore,
+) -> Option<PathBuf> {
+    let (kind, tun_enabled) = match store.settings.runtime_source() {
+        RuntimeSource::Singbox { id } => {
+            let content = store.subscriptions.iter().find(|s| s.id == id).and_then(
+                |s| match &s.source {
+                    SubscriptionSource::Singbox { content } => Some(content.clone()),
+                    _ => None,
+                },
+            )?;
+            let insight = inspect_singbox_config(&content);
+            (CoreKind::SingBox, insight.has_tun)
+        }
+        RuntimeSource::Generated => (
+            CoreKind::parse(&store.settings.core_type),
+            store.settings.tun_enabled,
+        ),
+    };
+    if !tun_enabled {
+        return None;
+    }
+    let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, kind);
+    let bin = bin?;
+    if crate::core::core_has_setuid(&bin) {
+        return None;
+    }
+    Some(bin)
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Self {
