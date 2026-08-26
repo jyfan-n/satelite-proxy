@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  ChainDiagnosis,
   ChainHop,
   CoreDownloadResult,
   CoreInfo,
@@ -774,6 +775,12 @@ export function listChains() {
   return invoke<ProxyChain[]>("list_chains");
 }
 
+/** Rule-set names referencing each chain (set-level pin or any single rule),
+ *  keyed by chain id — same detection the delete guard uses. */
+export function listChainUsage() {
+  return invoke<Record<string, string[]>>("list_chain_usage");
+}
+
 export function createChain(name: string, hops: ChainHop[]) {
   return invoke<ProxyChain>("create_chain", { name, hops });
 }
@@ -784,6 +791,11 @@ export function updateChain(id: string, name: string, hops: ChainHop[]) {
 
 export function deleteChain(id: string) {
   return invoke<void>("delete_chain", { id });
+}
+
+/** Probe each chain hop solo + through the chain prefix (sing-box only). */
+export function diagnoseChain(chainId: string) {
+  return invoke<ChainDiagnosis>("diagnose_chain", { chainId });
 }
 
 export function listConnections() {

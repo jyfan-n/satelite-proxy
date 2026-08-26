@@ -78,10 +78,11 @@ pub enum ChainHop {
 }
 
 /// Named, ordered chain of hops. sing-box has no native "chain" object —
-/// this is built into a `detour` chain: each hop's outbound sets `detour` to
-/// the next hop's outbound tag, so traffic flows hop[0] → hop[1] → … →
-/// hop[N-1] → internet. Rules reference the chain by id and route to
-/// `chain_outbound_tag()` (hop[0]'s tag), the entry point.
+/// this is built into a `detour` chain: rules route to the LAST hop's
+/// outbound tag (the exit the internet sees), and each hop[i ≥ 1] sets
+/// `detour` to hop[i-1]'s tag, so traffic flows
+/// client → hop[0] → hop[1] → … → hop[N-1] → internet. Rules reference the
+/// chain by id and route to `chain_outbound_tag()` (the exit hop's tag).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyChain {
     pub id: String,

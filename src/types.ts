@@ -590,6 +590,47 @@ export interface ProxyChain {
   hops: ChainHop[];
 }
 
+/** One hop's chain-diagnosis probes (see `services/chain_diag.rs`). */
+export interface ChainHopDiag {
+  label: string;
+  kind: "node" | "pool" | string;
+  stale: boolean;
+  /** Latency of the hop alone (plain node tag / shared pool selector). */
+  soloMs?: number | null;
+  soloError?: string | null;
+  /** Latency through the chain prefix ending at this hop (whole chain for
+   *  the last hop — the exit rules point there). */
+  chainedMs?: number | null;
+  chainedError?: string | null;
+}
+
+export interface ChainDiagnosis {
+  hops: ChainHopDiag[];
+  /** Real-world exit verification. */
+  exit: ChainExitProbe;
+}
+
+/** Geo/quality facts from api.ip.sb/geoip as seen by the chain's exit. */
+export interface ChainExitGeo {
+  ip: string;
+  country?: string | null;
+  countryCode?: string | null;
+  region?: string | null;
+  city?: string | null;
+  asn?: string | null;
+  asnOrganization?: string | null;
+  organization?: string | null;
+  timezone?: string | null;
+}
+
+export interface ChainExitProbe {
+  geo?: ChainExitGeo | null;
+  ipError?: string | null;
+  /** Real HTTPS round-trip to https://api.ip.sb/ip through the whole chain. */
+  ipSbMs?: number | null;
+  ipSbError?: string | null;
+}
+
 /** Live connection or historical request row */
 export interface ConnectionView {
   id: string;

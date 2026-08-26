@@ -10,6 +10,14 @@ use crate::error::{AppError, AppResult};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// Loopback-only mixed inbound through which `diagnose_chain` fetches echo
+/// services with a per-chain selector (see the "Diagnostics egress" comment
+/// in `build_singbox_config`). Uncommon port; a conflict fails core startup
+/// with a port-in-use error naming it.
+pub const DIAG_INBOUND_PORT: u16 = 26486;
+pub const DIAG_INBOUND_TAG: &str = "diag-in";
+pub const DIAG_SELECTOR_TAG: &str = "chain-diag";
+
 #[derive(Clone)]
 pub struct BuildOptions {
     pub mixed_port: u16,
@@ -191,6 +199,28 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
     let (chain_outbounds, chain_entry_tags) =
         build_chain_outbounds(&opts.chains, &opts.pools, nodes, &tags);
     outbounds.extend(chain_outbounds);
+    // Diagnostics egress (Proxy Chain feature): a loopback-only mixed inbound
+    // plus an app-owned selector over every chain's exit tag. `diagnose_chain`
+    // switches this selector through the Clash API and fetches an echo
+    // service via the inbound — real exit-IP verification with no user rule
+    // and no core restart. Emitted only when at least one chain resolves.
+    let diag_members: Vec<String> = opts
+        .chains
+        .iter()
+        .filter_map(|c| chain_entry_tags.get(&c.id).cloned())
+        .collect();
+    let has_diag = !diag_members.is_empty();
+    if has_diag {
+        let mut members = diag_members.clone();
+        members.push("direct".into());
+        let default = members[0].clone();
+        outbounds.push(json!({
+            "type": "selector",
+            "tag": DIAG_SELECTOR_TAG,
+            "outbounds": members,
+            "default": default,
+        }));
+    }
     outbounds.extend(node_outbounds);
     outbounds.push(json!({ "type": "direct", "tag": "direct" }));
     outbounds.push(json!({ "type": "block", "tag": "block" }));
@@ -219,6 +249,15 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
     let mut route_rules = Vec::new();
     // Sniff helps domain-based route / DNS on mixed + TUN
     route_rules.push(json!({ "action": "sniff" }));
+    if has_diag {
+        // Diagnostics traffic wins over every user rule: the diag inbound is
+        // app-owned and its whole purpose is per-selector egress, regardless
+        // of what the user's rules would do with the echo-service domain.
+        route_rules.push(json!({
+            "inbound": [DIAG_INBOUND_TAG],
+            "outbound": DIAG_SELECTOR_TAG
+        }));
+    }
     if opts.block_quic {
         // QUIC relayed through XUDP-in-TCP carries two independent congestion
         // controllers (inner QUIC, outer TCP); on a mediocre link that fights
@@ -274,6 +313,17 @@ pub fn build_singbox_config(nodes: &[ProxyNode], opts: &BuildOptions) -> AppResu
             "tag": format!("in-{}-{}", inb.kind, inb.port),
             "listen": if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
             "listen_port": inb.port
+        }));
+    }
+
+    if has_diag {
+        // Loopback-only egress for chain diagnostics (see the selector note
+        // above) — never exposed to the LAN.
+        inbounds.push(json!({
+            "type": "mixed",
+            "tag": DIAG_INBOUND_TAG,
+            "listen": "127.0.0.1",
+            "listen_port": DIAG_INBOUND_PORT
         }));
     }
 
@@ -953,40 +1003,83 @@ fn build_pool_selectors(
     out
 }
 
+/// Member nodes for one [`NodePool`] (live in `tags`), mirroring
+/// [`pool_member_tags`]'s ordering — `Explicit` keeps its configured order,
+/// `Keyword` is latency-sorted. Used where the chain builder needs the nodes
+/// themselves (to mint per-member clones), not just their tags.
+fn pool_member_nodes<'a>(
+    pool: &crate::domain::NodePool,
+    nodes: &'a [ProxyNode],
+    tags: &[String],
+) -> Vec<&'a ProxyNode> {
+    use crate::domain::PoolMode;
+    let live = |n: &ProxyNode| tags.iter().any(|t| t == &outbound_tag(n));
+    match &pool.mode {
+        PoolMode::Explicit { node_ids } => node_ids
+            .iter()
+            .filter_map(|nid| nodes.iter().find(|n| &n.id == nid))
+            .filter(|n| live(n))
+            .collect(),
+        PoolMode::Keyword { include, exclude } => {
+            let mut members: Vec<&ProxyNode> = nodes
+                .iter()
+                .filter(|n| crate::domain::name_matches_keywords(&n.name, include, exclude))
+                .filter(|n| live(n))
+                .collect();
+            members.sort_by_key(|n| n.latency_ms.unwrap_or(u32::MAX / 4));
+            members
+        }
+    }
+}
+
 /// Per-chain-hop-local outbound tag for a `Node` hop. Deliberately distinct
 /// from `outbound_tag(node)` — the chain rewrites this clone's `detour` to
 /// the next hop, and that must never leak onto the tag the node is directly
 /// selectable under elsewhere in the config.
-fn chain_hop_outbound_tag(chain: &crate::domain::ProxyChain, hop_index: usize) -> String {
+pub fn chain_hop_outbound_tag(chain: &crate::domain::ProxyChain, hop_index: usize) -> String {
     format!(
         "{}-h{hop_index}",
         &chain.id[chain.id.len().saturating_sub(20)..]
     )
 }
 
-/// Build the `detour` chain for one [`ProxyChain`]: hop[0]'s outbound sets
-/// `detour` to hop[1]'s tag, hop[1] to hop[2], …, the last hop has no detour
-/// (it exits to the internet directly). Only `Node` hops need a minted
-/// outbound (their own extra_outbounds, e.g. shadowtls, ride along); `Pool`
-/// hops detour straight into that pool's existing selector tag — no clone
-/// needed since a selector has no "own connection" to redirect.
+/// Build the `detour` chain for one [`ProxyChain`]. User-facing semantics:
+/// traffic flows hop[0] → hop[1] → … → hop[N-1] → internet — hop[0] is the
+/// client-side entry, hop[N-1] is the exit the internet sees.
+///
+/// In sing-box terms `A.detour = B` means "A's server connection is dialed
+/// through B, and A remains the exit" — so the route must point at the LAST
+/// hop's tag, and each hop[i] (i ≥ 1) carries `detour: hop[i-1]`. hop[0] has
+/// no detour (the client dials it directly). Only `Node` hops need a minted
+/// outbound (their own extra_outbounds, e.g. shadowtls, ride along).
+///
+/// `Pool` hops split by position. A pool at hop[0] is the client-side entry:
+/// the client dials the selected member directly, so the shared pool
+/// selector works as-is. A pool at i ≥ 1 is dialed through hop[i-1], which
+/// the shared selector's detour-less members can't express — it's expanded
+/// into per-member clones (each carrying `detour` → the previous hop's tag)
+/// grouped under a chain-local selector, so whichever member is picked keeps
+/// chaining.
 ///
 /// sing-box requires a `detour` target to be defined before the outbound
-/// that references it, so hops are emitted in reverse (last hop first).
-/// Returns `None` if any hop is unreachable (stale id / empty pool) — a
-/// chain with a broken link can't route traffic, so the whole chain is
-/// treated as absent rather than silently truncated.
+/// that references it, so hops are emitted in forward order (each hop's
+/// target — the previous hop — already precedes it). Returns `None` if any
+/// hop is unreachable (stale id / empty pool / member that can't map to an
+/// outbound) — a chain with a broken link can't route traffic, so the whole
+/// chain is treated as absent rather than silently truncated.
 fn build_chain_outbounds_for(
     chain: &crate::domain::ProxyChain,
+    pools: &[crate::domain::NodePool],
     nodes: &[ProxyNode],
     tags: &[String],
     live_pool_ids: &std::collections::HashSet<&str>,
 ) -> Option<(Vec<Value>, String)> {
     use crate::domain::ChainHop;
 
-    // Resolve every hop's "next detour target" tag first (pool selector tag,
-    // or the next Node hop's minted per-chain tag), bailing out on any dead
-    // hop before emitting anything.
+    let last = chain.hops.len().saturating_sub(1);
+
+    // Resolve every hop's tag first, bailing out on any dead hop before
+    // emitting anything.
     let mut hop_tags: Vec<String> = Vec::with_capacity(chain.hops.len());
     for (i, hop) in chain.hops.iter().enumerate() {
         match hop {
@@ -1008,37 +1101,86 @@ fn build_chain_outbounds_for(
                 if !live_pool_ids.contains(pool_id.as_str()) {
                     return None;
                 }
-                hop_tags.push(crate::domain::pool_outbound_tag_for_id(pool_id));
+                // hop[0] pool: client-side entry, shared selector is fine;
+                // pools at i ≥ 1 get a chain-local selector over clones.
+                let tag = if i == 0 {
+                    crate::domain::pool_outbound_tag_for_id(pool_id)
+                } else {
+                    chain_hop_outbound_tag(chain, i)
+                };
+                hop_tags.push(tag);
             }
         }
     }
 
     let mut outbounds = Vec::with_capacity(chain.hops.len());
-    // Emit last-to-first so each hop's detour target already precedes it.
-    for i in (0..chain.hops.len()).rev() {
-        let ChainHop::Node { node_id } = &chain.hops[i] else {
-            // Pool hops detour into an already-emitted selector; nothing to mint.
-            continue;
+    // Emit in forward order so each hop's detour target (the previous hop)
+    // already precedes it.
+    for i in 0..chain.hops.len() {
+        let prev_tag = if i == 0 {
+            None
+        } else {
+            Some(hop_tags[i - 1].clone())
         };
-        let node = nodes
-            .iter()
-            .find(|n| &n.id == node_id)
-            .expect("presence checked above");
-        let own_tag = hop_tags[i].clone();
-        let (_, mut ob, extra) = match node_to_outbound_tagged(node, Some(&own_tag)) {
-            Ok(v) => v,
-            Err(_) => return None,
-        };
-        outbounds.extend(extra);
-        if let Some(next_tag) = hop_tags.get(i + 1) {
-            if let Some(obj) = ob.as_object_mut() {
-                obj.insert("detour".into(), json!(next_tag));
+        match &chain.hops[i] {
+            ChainHop::Pool { pool_id } if i != 0 => {
+                let pool = pools
+                    .iter()
+                    .find(|p| &p.id == pool_id)
+                    .expect("liveness checked in the tag pass");
+                let members = pool_member_nodes(pool, nodes, tags);
+                let mut clone_tags = Vec::with_capacity(members.len());
+                for (j, node) in members.into_iter().enumerate() {
+                    let clone_tag = format!("{}-m{j}", hop_tags[i]);
+                    let (_, mut ob, extra) = match node_to_outbound_tagged(node, Some(&clone_tag))
+                    {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    };
+                    outbounds.extend(extra);
+                    if let (Some(prev), Some(obj)) = (prev_tag.as_ref(), ob.as_object_mut()) {
+                        obj.insert("detour".into(), json!(prev));
+                    }
+                    outbounds.push(ob);
+                    clone_tags.push(clone_tag);
+                }
+                // A pool with zero clones was filtered by `live_pool_ids`
+                // already; guard anyway — an empty selector is invalid.
+                if clone_tags.is_empty() {
+                    return None;
+                }
+                let default = clone_tags[0].clone();
+                outbounds.push(json!({
+                    "type": "selector",
+                    "tag": hop_tags[i],
+                    "outbounds": clone_tags,
+                    "default": default,
+                }));
+            }
+            // hop[0] pool: the shared pool selector is emitted by
+            // `build_pool_selectors` and is dialed by the client directly.
+            ChainHop::Pool { .. } => {}
+            ChainHop::Node { node_id } => {
+                let node = nodes
+                    .iter()
+                    .find(|n| &n.id == node_id)
+                    .expect("presence checked above");
+                let own_tag = hop_tags[i].clone();
+                let (_, mut ob, extra) = match node_to_outbound_tagged(node, Some(&own_tag)) {
+                    Ok(v) => v,
+                    Err(_) => return None,
+                };
+                outbounds.extend(extra);
+                if let (Some(prev), Some(obj)) = (prev_tag.as_ref(), ob.as_object_mut()) {
+                    obj.insert("detour".into(), json!(prev));
+                }
+                outbounds.push(ob);
             }
         }
-        outbounds.push(ob);
     }
 
-    let entry_tag = hop_tags[0].clone();
+    // Rules route to the LAST hop — it is the exit the internet sees.
+    let entry_tag = hop_tags[last].clone();
     Some((outbounds, entry_tag))
 }
 
@@ -1060,7 +1202,7 @@ fn build_chain_outbounds(
     let mut entry_tags = std::collections::HashMap::new();
     for chain in chains {
         if let Some((chain_outbounds, entry_tag)) =
-            build_chain_outbounds_for(chain, nodes, tags, &live_pool_ids)
+            build_chain_outbounds_for(chain, pools, nodes, tags, &live_pool_ids)
         {
             outbounds.extend(chain_outbounds);
             entry_tags.insert(chain.id.clone(), entry_tag);
@@ -1765,7 +1907,7 @@ mod tests {
         };
 
         // Both outbounds.
-        let mut a = sample_ss();
+        let a = sample_ss();
         let mut b = sample_ss();
         if let ProtocolConfig::Shadowsocks { password, .. } = &mut b.config {
             *password = "other-secret".into();
@@ -3465,11 +3607,98 @@ mod tests {
     }
 
     #[test]
-    fn chain_detour_points_entry_hop_at_the_next_hop_not_the_reverse() {
-        // sing-box's `detour` means "dial through this outbound first" — for
-        // a user-facing chain hop[0] -> hop[1] -> hop[2] that means hop[0]'s
-        // outbound carries `detour: hop[1]`, not the other way around. Get
-        // this backwards and traffic exits through the wrong node.
+    fn diag_inbound_selector_and_rule_emit_only_with_chains() {
+        // The diagnostics egress (loopback mixed inbound + chain-diag
+        // selector + priority inbound rule) is the rule-free way
+        // `diagnose_chain` fetches a chosen chain's exit IP. It must exist
+        // exactly when at least one chain resolves, and never leak to the
+        // LAN.
+        use crate::domain::{ChainHop, ProxyChain};
+        let opts = |chains: Vec<ProxyChain>| BuildOptions {
+            mixed_port: 2080,
+            allow_lan: false,
+            api_port: 19090,
+            extra_inbounds: vec![],
+            api_secret: "test".into(),
+            current_node_id: None,
+            log_level: "info".into(),
+            rules: vec![],
+            rule_sets: vec![],
+            pools: vec![],
+            chains,
+            tun_enabled: false,
+            tun_stack: "mixed".into(),
+            dns: DnsSettings::default(),
+            outbound_mode: OutboundMode::Rule,
+            route_final: "proxy".into(),
+            auto_select: crate::domain::AutoSelectMode::Off,
+            probe_url: "https://www.gstatic.com/generate_204".into(),
+            find_process: true,
+            tun_ipv6: false,
+            block_quic: false,
+            bypass_lan: false,
+            tun_interface_name: None,
+        };
+        let nodes = vec![sample_node("n1", "A"), sample_node("n2", "B")];
+        let chain = ProxyChain::new(
+            "诊断链",
+            vec![
+                ChainHop::Node { node_id: "n1".into() },
+                ChainHop::Node { node_id: "n2".into() },
+            ],
+        );
+
+        let with = build_singbox_config(&nodes, &opts(vec![chain])).unwrap();
+        let diag_in = with.value["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["tag"] == json!("diag-in"))
+            .expect("diag inbound emitted");
+        assert_eq!(diag_in["listen"], json!("127.0.0.1"), "loopback only");
+        assert_eq!(diag_in["listen_port"], json!(26486));
+        let selector = with.value["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == json!("chain-diag"))
+            .expect("chain-diag selector");
+        let members = selector["outbounds"].as_array().unwrap();
+        assert!(members.len() >= 2, "chain exit tags + direct fallback");
+        assert_eq!(members[members.len() - 1], json!("direct"));
+        // Right after the sniff rule and ahead of every user rule.
+        let first_rule = &with.value["route"]["rules"].as_array().unwrap()[1];
+        assert_eq!(first_rule["inbound"], json!(["diag-in"]));
+        assert_eq!(first_rule["outbound"], json!("chain-diag"));
+
+        let without = build_singbox_config(&nodes, &opts(vec![])).unwrap();
+        assert!(
+            !without.value["inbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["tag"] == json!("diag-in")),
+            "no chains -> no diag inbound"
+        );
+        assert!(
+            !without.value["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["tag"] == json!("chain-diag")),
+            "no chains -> no diag selector"
+        );
+    }
+
+    #[test]
+    fn chain_routes_to_the_exit_and_each_hop_detours_to_the_previous() {
+        // sing-box's `A.detour = B` means "A's server connection is dialed
+        // through B, and A remains the exit". For a user-facing chain
+        // hop[0] → hop[1] → hop[2] → internet that means: rules point at the
+        // LAST hop (the exit the internet sees), and hop[i] carries
+        // `detour: hop[i-1]`; hop[0] is dialed directly by the client. The
+        // original implementation had this exactly backwards — [US → HK]
+        // chains egressed from the US.
         use crate::domain::{ChainHop, ProxyChain};
         let nodes = vec![
             sample_node("n1", "Entry"),
@@ -3500,19 +3729,20 @@ mod tests {
                 .find(|o| o["tag"] == json!(t))
                 .unwrap_or_else(|| panic!("missing outbound {t}"))
         };
-        let hop0 = by_tag(&entry_tag);
-        let hop0_detour = hop0["detour"].as_str().expect("hop0 has a detour").to_string();
-        let hop1 = by_tag(&hop0_detour);
-        let hop1_detour = hop1["detour"].as_str().expect("hop1 has a detour").to_string();
-        let hop2 = by_tag(&hop1_detour);
-        // Last hop exits directly — no further detour.
+        // Route rules must point at the EXIT hop's chain-local tag — the
+        // internet sees this node's IP.
+        let hop2 = by_tag(&entry_tag);
+        let hop2_detour = hop2["detour"].as_str().expect("exit hop detours").to_string();
+        let hop1 = by_tag(&hop2_detour);
+        let hop1_detour = hop1["detour"].as_str().expect("middle hop detours").to_string();
+        let hop0 = by_tag(&hop1_detour);
+        // The client-side entry dials out directly — no further detour.
         assert!(
-            hop2.get("detour").is_none(),
-            "the exit hop must not detour anywhere — it's the one that reaches the internet"
+            hop0.get("detour").is_none(),
+            "the client-side entry must not detour anywhere — the client dials it directly"
         );
-        // Route rules must point at the entry hop, not the exit — the entry
-        // is the first thing the client's connection touches.
-        assert_ne!(entry_tag, outbound_tag(&nodes[2]));
+        // The detour chain must follow hop order: 2→1→0.
+        assert_ne!(hop2_detour, hop1_detour);
     }
 
     #[test]
@@ -3583,11 +3813,10 @@ mod tests {
     }
 
     #[test]
-    fn chain_pool_hop_detours_into_the_pool_selector_not_a_clone() {
-        // A selector outbound has no "own connection" to redirect, so a Pool
-        // hop must detour straight into the pool's existing selector tag —
-        // minting a clone for it would be redundant and wouldn't track pool
-        // membership changes on rebuild.
+    fn chain_with_leading_pool_reuses_the_shared_selector_as_client_entry() {
+        // A pool at hop[0] is the client-side entry — the client dials the
+        // selected member directly, so the shared pool selector works as-is
+        // and the exit node clone detours into it. No expansion needed.
         use crate::domain::{ChainHop, NodePool, PoolMode, ProxyChain};
         let nodes = vec![sample_node("n1", "PoolMember"), sample_node("n2", "Exit")];
         let tags: Vec<String> = nodes.iter().map(outbound_tag).collect();
@@ -3608,33 +3837,103 @@ mod tests {
                 },
             ],
         );
-        let pool_selectors = build_pool_selectors(&[pool.clone()], &nodes, &tags);
         let (chain_outbounds, entry_tags) =
             build_chain_outbounds(&[chain.clone()], &[pool.clone()], &nodes, &tags);
-        assert_eq!(
-            entry_tags[&chain.id], pool.outbound_tag(),
-            "entry tag for a pool-first chain is the pool's own selector tag"
-        );
-        let entry_ob = pool_selectors
-            .iter()
-            .find(|o| o["tag"] == json!(pool.outbound_tag()))
-            .expect("pool selector emitted");
-        assert_eq!(
-            entry_ob["detour"],
-            Value::Null,
-            "pool selectors are never given a detour themselves"
-        );
-        // The chain-minted exit hop is the one that carries no detour
-        // (nothing lives downstream of it).
-        let exit = chain_outbounds
-            .iter()
-            .find(|o| o.get("detour").is_none())
-            .expect("exit hop present");
+        let entry = entry_tags[&chain.id].clone();
         assert_ne!(
-            exit["tag"],
-            json!(outbound_tag(&nodes[1])),
-            "exit hop is a chain-local clone, not the plain node tag"
+            entry, pool.outbound_tag(),
+            "route points at the exit node clone, not the entry pool selector"
         );
+
+        let exit_ob = chain_outbounds
+            .iter()
+            .find(|o| o["tag"] == json!(entry))
+            .expect("exit clone emitted");
+        assert_eq!(
+            exit_ob["detour"],
+            json!(pool.outbound_tag()),
+            "exit clone dials through the (client-side) pool selector"
+        );
+        assert!(
+            chain_outbounds
+                .iter()
+                .all(|o| o["type"] != json!("selector")),
+            "a hop[0] pool needs no chain-local selector"
+        );
+    }
+
+    #[test]
+    fn chain_with_trailing_pool_expands_members_into_detour_clones() {
+        // A pool at i ≥ 1 is dialed through hop[i-1] — the shared selector's
+        // detour-less members can't express that, so the chain expands the
+        // pool into per-member clones (each detouring into the previous
+        // hop) under a chain-local selector, and rules route to that
+        // selector (its selected member is the exit).
+        use crate::domain::{ChainHop, NodePool, PoolMode, ProxyChain};
+        let nodes = vec![sample_node("n1", "Entry"), sample_node("n2", "PoolMember")];
+        let tags: Vec<String> = nodes.iter().map(outbound_tag).collect();
+        let pool = NodePool::new(
+            "出口池",
+            PoolMode::Explicit {
+                node_ids: vec!["n2".into()],
+            },
+        );
+        let chain = ProxyChain::new(
+            "入口过池",
+            vec![
+                ChainHop::Node {
+                    node_id: "n1".into(),
+                },
+                ChainHop::Pool {
+                    pool_id: pool.id.clone(),
+                },
+            ],
+        );
+        let (chain_outbounds, entry_tags) =
+            build_chain_outbounds(&[chain.clone()], &[pool.clone()], &nodes, &tags);
+        let entry = entry_tags[&chain.id].clone();
+        assert_ne!(entry, pool.outbound_tag(), "exit pool gets a chain-local selector");
+
+        let selector = chain_outbounds
+            .iter()
+            .find(|o| o["tag"] == json!(entry))
+            .expect("chain-local pool selector emitted");
+        assert_eq!(selector["type"], json!("selector"));
+        let members = selector["outbounds"].as_array().unwrap();
+        assert_eq!(members.len(), 1, "one clone per pool member");
+
+        // The member clone detours into the entry hop, and is itself a
+        // clone — the member's directly-selectable tag stays untouched.
+        let member_tag = members[0].as_str().unwrap().to_string();
+        assert_ne!(member_tag, outbound_tag(&nodes[1]));
+        let member_ob = chain_outbounds
+            .iter()
+            .find(|o| o["tag"] == json!(member_tag))
+            .expect("member clone emitted");
+        let entry_tag_ref = member_ob["detour"].as_str().expect("member clone detours").to_string();
+        assert_ne!(entry_tag_ref, outbound_tag(&nodes[0]), "entry hop is a chain-local clone");
+
+        let entry_ob = chain_outbounds
+            .iter()
+            .find(|o| o["tag"] == json!(entry_tag_ref))
+            .expect("entry hop emitted");
+        assert_eq!(
+            entry_ob.get("detour"),
+            None,
+            "the client-side entry dials out directly"
+        );
+
+        // sing-box requires detour targets to be defined before their
+        // referrers — the entry clone must precede the member clone.
+        let entry_pos = chain_outbounds
+            .iter()
+            .position(|o| o["tag"] == json!(entry_tag_ref))
+            .unwrap();
+        let member_pos = chain_outbounds
+            .iter()
+            .position(|o| o["tag"] == json!(member_tag))
+            .unwrap();
+        assert!(entry_pos < member_pos, "detour target precedes referrer");
     }
 
     #[test]

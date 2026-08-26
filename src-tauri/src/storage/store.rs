@@ -58,6 +58,10 @@ pub struct AppStore {
     retained_rules: Vec<Value>,
     #[serde(skip)]
     retained_rule_sets: Vec<Value>,
+    #[serde(skip)]
+    retained_pools: Vec<Value>,
+    #[serde(skip)]
+    retained_chains: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1485,6 +1489,29 @@ impl AppStore {
         Ok(chain.clone())
     }
 
+    /// Distinct rule-set names referencing each chain — the same reference
+    /// detection `delete_chain`'s guard uses (set-level pin OR any single
+    /// rule), deduped per set. Powers the chain list page's "used by N rule
+    /// sets" hint so users can see deletion impact up front.
+    pub fn chain_rule_usage(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut usage: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for set in &self.rule_sets {
+            let mut referenced_ids: Vec<&str> = Vec::new();
+            if let Some(id) = set.chain_id.as_deref() {
+                referenced_ids.push(id);
+            }
+            referenced_ids.extend(set.rules.iter().filter_map(|r| r.chain_id.as_deref()));
+            for id in referenced_ids {
+                let names = usage.entry(id.to_string()).or_default();
+                if !names.iter().any(|n| n == &set.name) {
+                    names.push(set.name.clone());
+                }
+            }
+        }
+        usage
+    }
+
     pub fn delete_chain(&mut self, id: &str) -> AppResult<()> {
         let referencing_rules: Vec<String> = self
             .rule_sets
@@ -1726,6 +1753,32 @@ fn store_from_json(value: Value) -> AppStore {
     store.rule_sets = rule_sets;
     store.retained_rule_sets = retained_sets;
 
+    // Pools/chains/node_aliases: MUST be read here — this hand-rolled loader
+    // is the only load path (the serde derives alone don't run for it), and
+    // any field it skips loads as empty and is then wiped from disk by the
+    // next save.
+    let (pools, retained_pools) =
+        split_known_items::<crate::domain::NodePool>(obj.get("pools"));
+    store.pools = pools;
+    store.retained_pools = retained_pools;
+
+    let (chains, retained_chains) =
+        split_known_items::<crate::domain::ProxyChain>(obj.get("chains"));
+    store.chains = chains;
+    store.retained_chains = retained_chains;
+
+    if let Some(aliases) = obj.get("node_aliases") {
+        match serde_json::from_value::<std::collections::BTreeMap<String, String>>(
+            aliases.clone(),
+        ) {
+            Ok(parsed) => store.node_aliases = parsed,
+            Err(error) => crate::app_log::warn(
+                "storage",
+                format!("ignored unreadable node_aliases object ({error}); keeping defaults"),
+            ),
+        }
+    }
+
     if let Some(settings) = obj.get("settings") {
         match serde_json::from_value::<AppSettings>(settings.clone()) {
             Ok(parsed) => store.settings = parsed,
@@ -1780,6 +1833,8 @@ fn serialize_store(store: &AppStore) -> Result<String, serde_json::Error> {
         merge_retained(obj, "nodes", &store.retained_nodes);
         merge_retained(obj, "rules", &store.retained_rules);
         merge_retained(obj, "rule_sets", &store.retained_rule_sets);
+        merge_retained(obj, "pools", &store.retained_pools);
+        merge_retained(obj, "chains", &store.retained_chains);
     }
     serde_json::to_string_pretty(&value)
 }
@@ -2327,6 +2382,57 @@ mod tests {
         assert_eq!(recovered.settings.mixed_port, 2201);
         assert_eq!(corrupt_snapshots(&path).len(), 1);
         assert!(parse_store(&fs::read_to_string(&path).unwrap()).is_ok());
+
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn pools_chains_and_aliases_survive_a_save_load_roundtrip() {
+        // Regression: the hand-rolled loader in `store_from_json` used to skip
+        // pools/chains/node_aliases entirely — they loaded as empty and the
+        // next save wiped them from disk (chains "disappeared" every restart).
+        use crate::domain::{ChainHop, PoolMode};
+        let path = test_store_path("chain-roundtrip");
+        let mut store = AppStore::default();
+        store.nodes.push(mk_stored_node("n1", "A"));
+        store.nodes.push(mk_stored_node("n2", "B"));
+        let pool = store
+            .create_pool(
+                "池",
+                PoolMode::Explicit {
+                    node_ids: vec!["n1".into()],
+                },
+            )
+            .unwrap();
+        let chain = store
+            .create_chain(
+                "链",
+                vec![
+                    ChainHop::Node {
+                        node_id: "n1".into(),
+                    },
+                    ChainHop::Pool {
+                        pool_id: pool.id.clone(),
+                    },
+                ],
+            )
+            .unwrap();
+        store
+            .node_aliases
+            .insert("identity|原名".into(), "别名".into());
+
+        store.save(&path).unwrap();
+        let reloaded = AppStore::load(&path, None).unwrap();
+
+        assert_eq!(reloaded.pools.len(), 1, "pools must survive reload");
+        assert_eq!(reloaded.pools[0].id, pool.id);
+        assert_eq!(reloaded.chains.len(), 1, "chains must survive reload");
+        assert_eq!(reloaded.chains[0].id, chain.id);
+        assert_eq!(
+            reloaded.node_aliases.get("identity|原名").map(String::as_str),
+            Some("别名"),
+            "node aliases must survive reload"
+        );
 
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -3416,6 +3522,61 @@ mod tests {
         let err = store.delete_chain(&chain.id).unwrap_err();
         assert!(err.to_string().contains("规则集引用"));
         assert_eq!(store.chains.len(), 1, "blocked delete must not remove the chain");
+    }
+
+    #[test]
+    fn chain_rule_usage_dedups_set_level_and_per_rule_references() {
+        use crate::domain::{
+            ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType,
+        };
+        let mut store = AppStore::default();
+        store.nodes.push(mk_stored_node("n1", "A"));
+        store.nodes.push(mk_stored_node("n2", "B"));
+        let chain = store
+            .create_chain(
+                "被引用链",
+                vec![
+                    ChainHop::Node { node_id: "n1".into() },
+                    ChainHop::Node { node_id: "n2".into() },
+                ],
+            )
+            .unwrap();
+
+        // Set A: whole-set chain pin AND a per-rule chain target — must count
+        // this set exactly once.
+        let mut set_a = RuleSet::new_user("集合A", vec![]);
+        set_a.strategy = RuleSetStrategy::Chain;
+        set_a.chain_id = Some(chain.id.clone());
+        let mut rule_a = Rule::new(
+            RuleType::DomainSuffix,
+            "example.com".into(),
+            RuleTarget::Chain,
+            0,
+        );
+        rule_a.chain_id = Some(chain.id.clone());
+        set_a.rules.push(rule_a);
+        // Set B: only a per-rule reference.
+        let mut set_b = RuleSet::new_user("集合B", vec![]);
+        let mut rule_b = Rule::new(
+            RuleType::DomainSuffix,
+            "other.com".into(),
+            RuleTarget::Chain,
+            0,
+        );
+        rule_b.chain_id = Some(chain.id.clone());
+        set_b.rules.push(rule_b);
+        // Set C: unrelated set, must not appear.
+        let set_c = RuleSet::new_user("集合C", vec![]);
+        store.rule_sets.push(set_a);
+        store.rule_sets.push(set_b);
+        store.rule_sets.push(set_c);
+
+        let usage = store.chain_rule_usage();
+        let names = &usage[&chain.id];
+        assert_eq!(names.len(), 2, "set A counted once despite two reference levels");
+        assert!(names.contains(&"集合A".to_string()));
+        assert!(names.contains(&"集合B".to_string()));
+        assert!(!names.contains(&"集合C".to_string()));
     }
 
     #[test]

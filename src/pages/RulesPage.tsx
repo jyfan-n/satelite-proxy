@@ -298,6 +298,10 @@ export function RulesPage({ embedded = false }: Props) {
   useEffect(() => {
     void reload();
     void ensureNodesLoaded();
+    // Without this, every remount (settings-tab switch) starts with an empty
+    // chain list and chain-target rules flash/permanently render as "stale"
+    // until some editor modal happens to call ensureChainsLoaded().
+    void ensureChainsLoaded();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
