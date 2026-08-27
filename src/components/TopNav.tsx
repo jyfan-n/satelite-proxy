@@ -23,9 +23,11 @@ const ITEMS: NavItem[] = [
 
 // Fixed slot width (sized for the longest English label, "Connections" =
 // 11 chars) plus the button's own left/right padding (0.5rem 0.75rem,
-// App.css:434). Every item shares this width so switching locale
-// only swaps the text — the pill never resizes.
-const ITEM_WIDTH = "calc(11ch + 1.5rem)";
+// App.css:434), scaled to 80% to narrow the nav capsule. Long English
+// labels may clip/wrap at this width — accepted tradeoff. Every item
+// shares this width so switching locale only swaps the text — the pill
+// never resizes.
+const ITEM_WIDTH = "calc((11ch + 1.5rem) * 0.8)";
 
 interface Props {
   active: NavKey;
