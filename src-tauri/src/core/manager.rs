@@ -262,12 +262,14 @@ impl CoreManager {
                 );
             }
 
-            return Err(AppError::Core(format!(
+            let message = format!(
                 "{} check failed ({status_s})\nconfig: {}\nbinary: {}\n{detail}",
                 kind.display_name(),
                 config.display(),
                 binary.display(),
-            )));
+            );
+            crate::app_log::error("core", message.clone());
+            return Err(AppError::Core(message));
         }
         Ok(())
     }
@@ -514,8 +516,17 @@ impl CoreManager {
             return self.start_elevated_windows(kind, binary, config, &log_path, mixed_port);
         }
 
+        let run_args = kind.run_command_args(config);
+        crate::app_log::info(
+            "core",
+            format!(
+                "starting {}: {}",
+                kind.display_name(),
+                format_command_line(binary, &run_args)
+            ),
+        );
         let mut cmd = Command::new(binary);
-        cmd.args(kind.run_command_args(config));
+        cmd.args(&run_args);
         // sing-box writes cache.db (fakeip/rule-set cache) relative to its cwd.
         // GUI apps launched from Finder/Dock inherit cwd "/" (read-only), which
         // makes cache_file init FATAL as soon as it's enabled. Anchor cwd to the
@@ -533,9 +544,11 @@ impl CoreManager {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
+                let msg = format!("spawn {} failed: {e}", kind.display_name());
+                crate::app_log::error("core", msg.clone());
                 self.state = CoreState::Error;
                 self.last_error = Some(e.to_string());
-                AppError::Core(format!("spawn {} failed: {e}", kind.display_name()))
+                AppError::Core(msg)
             })?;
 
         // Tie the child to the parent's lifetime via a Job Object: if this
@@ -586,12 +599,20 @@ impl CoreManager {
     #[cfg(target_os = "windows")]
     fn start_elevated_windows(
         &mut self,
-        _kind: CoreKind,
+        kind: CoreKind,
         binary: &Path,
         config: &Path,
         _log_path: &Path,
         mixed_port: u16,
     ) -> AppResult<()> {
+        crate::app_log::info(
+            "core",
+            format!(
+                "starting {} (elevated): {}",
+                kind.display_name(),
+                format_command_line(binary, &kind.run_command_args(config))
+            ),
+        );
         let helper = std::env::current_exe()
             .map_err(|e| AppError::Core(format!("resolve log helper: {e}")))?;
         let log_dir = self
@@ -624,19 +645,31 @@ impl CoreManager {
         self.wait_until_ready(mixed_port)
     }
 
+    /// Common failure tail for `wait_until_ready`: the process died while we
+    /// were waiting for it to bind. Logs the core's own output (via
+    /// `last_error`, populated by `poll` from the log tail) so startup
+    /// failures land in the app log, not just the returned error.
+    fn start_failed_error(&mut self) -> AppError {
+        let err = self
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "process exited immediately".into());
+        crate::app_log::error(
+            "core",
+            format!("{} failed to start: {err}", self.kind.display_name()),
+        );
+        self.state = CoreState::Error;
+        self.run_mode = RunMode::None;
+        AppError::Core(map_tun_permission_hint(&err))
+    }
+
     fn wait_until_ready(&mut self, mixed_port: u16) -> AppResult<()> {
         // wait a bit for immediate FATAL
         for _ in 0..20 {
             std::thread::sleep(Duration::from_millis(100));
             self.poll();
             if !self.process_tracked_alive() {
-                let err = self
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| "process exited immediately".into());
-                self.state = CoreState::Error;
-                self.run_mode = RunMode::None;
-                return Err(AppError::Core(map_tun_permission_hint(&err)));
+                return Err(self.start_failed_error());
             }
             if !Self::is_port_free(mixed_port) {
                 break;
@@ -645,13 +678,7 @@ impl CoreManager {
 
         self.poll();
         if !self.process_tracked_alive() {
-            let err = self
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "process exited immediately".into());
-            self.state = CoreState::Error;
-            self.run_mode = RunMode::None;
-            return Err(AppError::Core(map_tun_permission_hint(&err)));
+            return Err(self.start_failed_error());
         }
 
         self.state = CoreState::Running;
@@ -901,6 +928,23 @@ fn elevated_kill_force(pid: u32) {
             .args(["-KILL", &pid.to_string()])
             .status();
     }
+}
+
+/// Format a core command line the way a shell would need it: binary and any
+/// argument containing spaces (config paths live under "Application Support")
+/// get quoted, so the logged line can be copied into a terminal as-is.
+fn format_command_line(binary: &Path, args: &[String]) -> String {
+    let quote = |arg: &str| {
+        if arg.contains(' ') {
+            format!("\"{arg}\"")
+        } else {
+            arg.to_string()
+        }
+    };
+    std::iter::once(quote(&binary.display().to_string()))
+        .chain(args.iter().map(|a| quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// True when `err` is sing-box's `cache_file` init dying on a `cache.db`

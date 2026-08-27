@@ -1584,28 +1584,19 @@ fn ensure_listen_port_available(port: u16, label: &str) -> AppResult<()> {
     ensure_listen_port_available_on(port, "127.0.0.1", label)
 }
 
-/// Like `ensure_listen_port_available`, but probes the actual host the core
-/// will bind to. `allow_lan` switches the mixed/extra inbounds from
-/// 127.0.0.1 to 0.0.0.0 (see `config::builder`); a port can be free on
-/// loopback while still failing to bind on all interfaces (another process
-/// already holds 0.0.0.0:<port>, or — on macOS — the binary lacks the Local
-/// Network permission needed to bind a wildcard address). Catching that here
-/// turns an opaque post-spawn crash into a clear pre-flight error instead of
-/// a start/crash cycle.
+/// Pre-flight check for a listen port. Only rejects when another process is
+/// visibly LISTENing (lsof/netstat). Deliberately does NOT probe-bind the
+/// address itself: under TUN the core runs setuid-root, and a root-owned
+/// LISTEN socket is invisible to our unprivileged lsof while making our own
+/// probe bind fail with EADDRINUSE — so the bind probe misfires on exactly
+/// the app's own leftover core session (a long-standing false "port in use"
+/// block). Let the core spawn instead; if the port is genuinely taken, the
+/// core's own FATAL output surfaces through the startup error / app log.
 fn ensure_listen_port_available_on(port: u16, host: &str, label: &str) -> AppResult<()> {
     if CoreManager::has_port_listener(port) {
         return Err(AppError::Core(format!(
             "{label} 端口 {host}:{port} 已被其他程序占用，请关闭冲突程序或修改端口"
         )));
-    }
-    if host != "127.0.0.1" {
-        std::net::TcpListener::bind((host, port)).map_err(|e| {
-            AppError::Core(format!(
-                "{label} 端口 {host}:{port} 绑定失败：{e}\n\
-                 若已开启「局域网连接」，请检查系统「隐私与安全性 → 本地网络」是否已允许本应用，\n\
-                 或更换端口后重试。"
-            ))
-        })?;
     }
     Ok(())
 }
