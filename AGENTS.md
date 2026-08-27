@@ -285,7 +285,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 | `LogsPage` (207) | 应用日志查看（1.2s 增量，级别过滤+搜索） |
 | `SettingsPage` (1456) | 6 tab：app/ports/rules/dns/hosts/core；内嵌 Rules/Dns/Hosts 页；三内核行（各自版本/下载/更新，进度事件按 kind 分流）、更新检查、诊断、托盘图标选择、赞助二维码（`DecryptReveal`） |
 | `RulesPage` (2145) | ★ 最大页面：规则集侧栏+编辑器、本地/远程集、策略/DNS 策略、route.final、拖拽排序、远程规则项浏览；geodata 内核（Xray/mihomo）下内置 3 条显示为 geodata 卡（来源/文件按内核区分，更新走 `refresh_geodata(kind)`），自建 .srs 置灰；策略可指向 chain（`chain_id`） |
-| `ChainPage` (~970) | 节点池卡片 + 链路列表，内嵌于 Settings；链路编辑器为 xyflow（`@xyflow/react`）画布：侧栏候选拖入/点击追加（WKWebView 无 HTML5 DnD，用指针事件自实现）、`hopsFromGraph` 单线路径校验（连线时 `isValidConnection` 即时拦截分支/环/自环）、图序号徽标 + 实时有效性状态行、整理布局按钮；fitView 仅在打开已有链路且节点完成测量后执行一次（`useNodesInitialized`），否则画布会因未测量节点算出坏视口而看似空白、或投放后视口跳走 |
+| `ChainPage` (~1700) | 高密度管理列表，内嵌于 Settings：节点池=单容器紧凑行（名称+关键字+模式pill+计数+引用，行尾 `RowMenu` ⋮ 菜单，复用 rule-menu 范式），链卡=头行徽标（跳数/规则引用/⋮）+ 地铁线 stepper；链路编辑器为 xyflow（`@xyflow/react`）画布：侧栏候选拖入/点击追加（WKWebView 无 HTML5 DnD，用指针事件自实现）、`hopsFromGraph` 单线路径校验（连线时 `isValidConnection` 即时拦截分支/环/自环）、图序号徽标 + 实时有效性状态行、整理布局按钮；fitView 仅在打开已有链路且节点完成测量后执行一次（`useNodesInitialized`），否则画布会因未测量节点算出坏视口而看似空白、或投放后视口跳走 |
 | `DnsPage` (329) / `HostsPage` (463) | DNS/Hosts 管理，通常内嵌于 Settings |
 
 ### 6.4 简洁模式（ui/simple/）

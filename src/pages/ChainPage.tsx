@@ -343,10 +343,79 @@ function edgesFromHops(hops: ChainHop[]): Edge[] {
   return out;
 }
 
-function PoolCard({
+/** One entry in a RowMenu dropdown. */
+type RowMenuItem = {
+  key: string;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+};
+
+/** Compact "⋮" overflow menu for pool rows and chain cards — the same idiom
+    as the subscription card menu: opaque popover (never glass), capture-phase
+    outside click via [data-chain-menu], Escape to close. Rows in the lower
+    half of a list pass flipUp so the popup opens toward the roomier side. */
+function RowMenu({ items, flipUp = false }: { items: RowMenuItem[]; flipUp?: boolean }) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocPointerDown(e: PointerEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("[data-chain-menu]")) return;
+      setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDocPointerDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="rule-menu chain-menu" data-chain-menu>
+      <button
+        type="button"
+        className="rule-menu-trigger"
+        aria-label={t("common.actions")}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        ⋮
+      </button>
+      {open && (
+        <div className={`rule-menu-pop chain-menu-pop${flipUp ? " up" : ""}`} role="menu">
+          {items.map((it) => (
+            <button
+              key={it.key}
+              type="button"
+              role="menuitem"
+              className={`rule-menu-item${it.danger ? " danger" : ""}`}
+              onClick={() => {
+                setOpen(false);
+                it.onClick();
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PoolRow({
   pool,
   nodes,
   usedByChains,
+  flipUp,
   onEdit,
   onDelete,
 }: {
@@ -354,6 +423,8 @@ function PoolCard({
   nodes: ProxyNode[];
   /** How many chains route through this pool — deletion-risk hint. */
   usedByChains: number;
+  /** Lower-half rows open the ⋮ menu upward (no room below the list). */
+  flipUp: boolean;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -372,35 +443,32 @@ function PoolCard({
     ].join(" ");
   }
   return (
-    <div className="card chain-pool-card">
-      <div className="chain-pool-card-head">
-        <span className="chain-pool-name">
-          <span className="chain-pool-glyph" aria-hidden="true">
-            <PoolGlyph />
-          </span>
-          {pool.name}
+    <div className="chain-pool-row" title={keywords ?? undefined}>
+      <span className="chain-pool-name">
+        <span className="chain-pool-glyph" aria-hidden="true">
+          <PoolGlyph />
         </span>
-        <span className={`pill ${pool.mode.mode === "explicit" ? "target-node" : "target-smart"}`}>
-          {pool.mode.mode === "explicit" ? t("chain.poolModeExplicit") : t("chain.poolModeKeyword")}
+        {pool.name}
+      </span>
+      {keywords && <span className="chain-pool-row-kw">{keywords}</span>}
+      <span className={`pill ${pool.mode.mode === "explicit" ? "target-node" : "target-smart"}`}>
+        {pool.mode.mode === "explicit" ? t("chain.poolModeExplicit") : t("chain.poolModeKeyword")}
+      </span>
+      <span className="chain-row-meta">
+        {memberCount} {t("chain.poolMembersSuffix")}
+      </span>
+      {usedByChains > 0 && (
+        <span className="chain-row-meta chain-card-usage">
+          {t("chain.usedByChains", { n: usedByChains })}
         </span>
-      </div>
-      <p className="muted chain-pool-summary" title={keywords ?? undefined}>
-        {keywords || t("chain.poolModeExplicit")}
-      </p>
-      <div className="chain-card-meta">
-        <span>
-          {memberCount} {t("chain.poolMembersSuffix")}
-        </span>
-        {usedByChains > 0 && (
-          <span className="chain-card-usage">{t("chain.usedByChains", { n: usedByChains })}</span>
-        )}
-      </div>
-      <div className="chain-pool-card-actions">
-        <GlassButton onClick={onEdit}>{t("common.edit")}</GlassButton>
-        <GlassButton variant="danger" onClick={onDelete}>
-          {t("common.delete")}
-        </GlassButton>
-      </div>
+      )}
+      <RowMenu
+        flipUp={flipUp}
+        items={[
+          { key: "edit", label: t("common.edit"), onClick: onEdit },
+          { key: "delete", label: t("common.delete"), danger: true, onClick: onDelete },
+        ]}
+      />
     </div>
   );
 }
@@ -1479,7 +1547,7 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
         <div className="chain-section-head">
           <h2>{t("chain.poolsHeading")}</h2>
           <GlassButton variant="primary" onClick={() => setPoolEditor({ pool: null })}>
-            {t("chain.newPool")}
+            {t("common.create")}
           </GlassButton>
         </div>
         {loading ? (
@@ -1487,13 +1555,14 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
         ) : pools.length === 0 ? (
           <p className="muted">{t("chain.noPoolsYet")}</p>
         ) : (
-          <div className="chain-pool-grid">
-            {pools.map((p) => (
-              <PoolCard
+          <div className="card chain-pool-list">
+            {pools.map((p, i) => (
+              <PoolRow
                 key={p.id}
                 pool={p}
                 nodes={nodes}
                 usedByChains={poolChainCount.get(p.id) ?? 0}
+                flipUp={i >= Math.ceil(pools.length / 2)}
                 onEdit={() => setPoolEditor({ pool: p })}
                 onDelete={() => setConfirmDelete({ kind: "pool", id: p.id, name: p.name })}
               />
@@ -1506,7 +1575,7 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
         <div className="chain-section-head">
           <h2>{t("chain.chainsHeading")}</h2>
           <GlassButton variant="primary" onClick={() => setChainEditor({ chain: null })}>
-            {t("chain.newChain")}
+            {t("common.create")}
           </GlassButton>
         </div>
         {loading ? (
@@ -1515,26 +1584,44 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
           <p className="muted">{t("chain.noChainsYet")}</p>
         ) : (
           <div className="chain-list">
-            {chains.map((c) => {
+            {chains.map((c, i) => {
               const usageNames = chainUsage[c.id] ?? [];
               return (
                 <div key={c.id} className="card chain-card">
                   <div className="chain-card-head">
-                    <span className="chain-card-name">{c.name}</span>
-                    <div className="chain-card-actions">
-                      <GlassButton onClick={() => setDiagFor(c)}>{t("chain.diag")}</GlassButton>
-                      <GlassButton onClick={() => setChainEditor({ chain: c })}>
-                        {t("common.edit")}
-                      </GlassButton>
-                      <GlassButton
-                        variant="danger"
-                        onClick={() =>
-                          setConfirmDelete({ kind: "chain", id: c.id, name: c.name })
-                        }
-                      >
-                        {t("common.delete")}
-                      </GlassButton>
-                    </div>
+                    <span className="chain-card-name" title={c.name}>
+                      {c.name}
+                    </span>
+                    <span className="chain-card-badges">
+                      <span className="chain-row-meta">
+                        {t("chain.hopsCount", { n: c.hops.length })}
+                      </span>
+                      {usageNames.length > 0 ? (
+                        <span className="chain-card-usage" title={usageNames.join(" · ")}>
+                          {t("chain.usedByRuleSets", { n: usageNames.length })}
+                        </span>
+                      ) : (
+                        <span className="chain-card-usage none">{t("chain.notUsedByRules")}</span>
+                      )}
+                      <RowMenu
+                        flipUp={i >= Math.ceil(chains.length / 2)}
+                        items={[
+                          { key: "diag", label: t("chain.diag"), onClick: () => setDiagFor(c) },
+                          {
+                            key: "edit",
+                            label: t("common.edit"),
+                            onClick: () => setChainEditor({ chain: c }),
+                          },
+                          {
+                            key: "delete",
+                            label: t("common.delete"),
+                            danger: true,
+                            onClick: () =>
+                              setConfirmDelete({ kind: "chain", id: c.id, name: c.name }),
+                          },
+                        ]}
+                      />
+                    </span>
                   </div>
                   {/* The pipeline IS the card: stations on a rail — entry
                       dot green, exit dot blue, arrows read client →
@@ -1575,16 +1662,6 @@ export function ChainPage({ embedded = false }: { embedded?: boolean }) {
                         </div>
                       );
                     })}
-                  </div>
-                  <div className="chain-card-meta">
-                    <span>{t("chain.hopsCount", { n: c.hops.length })}</span>
-                    {usageNames.length > 0 ? (
-                      <span className="chain-card-usage" title={usageNames.join(" · ")}>
-                        {t("chain.usedByRuleSets", { n: usageNames.length })}
-                      </span>
-                    ) : (
-                      <span className="chain-card-usage none">{t("chain.notUsedByRules")}</span>
-                    )}
                   </div>
                 </div>
               );

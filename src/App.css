@@ -8271,7 +8271,7 @@ li.virt-pad {
 /* ---- Chain page (node pools + multi-hop chains) ------------------------ */
 
 .chain-section {
-  margin-bottom: 1.5rem;
+  margin-bottom: 1rem;
 }
 
 .chain-section-head {
@@ -8288,22 +8288,33 @@ li.virt-pad {
   color: var(--text);
 }
 
-.chain-pool-grid {
+/* Pool list: dense two-column row grid — the old card grid spent ~160px per
+   pool on four stacked lines; the 960px pro window fits two ~330px columns,
+   so N pools stack Math.ceil(N/2) visual rows. */
+.chain-pool-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 0.1rem;
+  padding: 0.3rem;
 }
 
-.chain-pool-card {
-  padding: 0.85rem 1rem;
-}
-
-.chain-pool-card-head {
+.chain-pool-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
-  margin-bottom: 0.4rem;
+  padding: 0.28rem 0.5rem;
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.chain-pool-row:hover {
+  background: var(--hover-wash);
+}
+
+.chain-pool-row .chain-pool-name {
+  flex: 0 1 auto;
+  min-width: 3rem;
+  font-size: 0.8rem;
 }
 
 .chain-pool-name {
@@ -8333,21 +8344,42 @@ li.virt-pad {
   vertical-align: -1px;
 }
 
-.chain-pool-summary {
-  margin: 0 0 0.55rem;
-  font-size: 0.75rem;
+/* Keyword tokens ride inline after the pool name (full string in the row
+   title). Explicit pools have no keywords — the pill's margin-left:auto keeps
+   the metadata cluster right-aligned in both cases. */
+.chain-pool-row-kw {
+  flex: 1 1 auto;
+  min-width: 2rem;
+  font-size: 0.72rem;
+  color: var(--muted);
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.chain-pool-row .pill {
+  margin-left: auto;
+  flex: none;
+}
+
+/* Shared inline metadata run for pool rows and chain card head badges. */
+.chain-row-meta {
+  flex: none;
+  font-size: 0.72rem;
+  color: var(--muted);
   white-space: nowrap;
 }
 
-.chain-pool-card .chain-card-meta {
-  margin-bottom: 0.55rem;
+/* Chain ⋮ menus reuse the rule-menu idiom but open DOWNWARD by default
+   (rows sit mid-page); .up flips for rows in the lower half of a list. */
+.chain-menu-pop {
+  bottom: auto;
+  top: calc(100% + 4px);
 }
 
-.chain-pool-card-actions {
-  display: flex;
-  gap: 0.5rem;
+.chain-menu-pop.up {
+  bottom: calc(100% + 4px);
+  top: auto;
 }
 
 /* Live keyword-filter feedback in the pool editor: match count + a one-line
@@ -8397,11 +8429,11 @@ li.virt-pad {
 .chain-list {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.5rem;
 }
 
 .chain-card {
-  padding: 0.85rem 1rem;
+  padding: 0.6rem 0.85rem 0.5rem;
 }
 
 .chain-card-head {
@@ -8409,18 +8441,27 @@ li.virt-pad {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.3rem;
 }
 
 .chain-card-name {
   font-weight: 600;
   color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.chain-card-actions {
+/* Head-line metadata cluster (hop count + rule usage + ⋮ menu) — absorbed
+   the old bottom meta row so the card is just two rows: head + stepper. */
+.chain-card-badges {
+  flex: none;
   display: flex;
-  gap: 0.5rem;
-  flex-shrink: 0;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 
 /* Chain preset card: the pipeline IS the card — a metro-line stepper. Each
@@ -8431,11 +8472,13 @@ li.virt-pad {
   display: flex;
   align-items: flex-start;
   overflow: hidden;
-  margin: 0.15rem 0 0.65rem;
+  margin: 0.15rem 0 0.1rem;
 }
 
+/* Equal-width stations: flex-basis 0 (not auto) so a long hop name can't
+   widen its station — dots stay evenly spaced and line up across cards. */
 .chain-station {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -8524,23 +8567,7 @@ li.virt-pad {
   background: var(--danger);
 }
 
-/* Meta row: hop count + reference hints — preset-library info only, no
-   runtime state on this page. */
-.chain-card-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  font-size: 0.72rem;
-  color: var(--muted);
-}
-
-.chain-card-meta > span {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
+/* Usage hints — preset-library info only, no runtime state on this page. */
 .chain-card-usage {
   color: var(--accent-purple);
 }
