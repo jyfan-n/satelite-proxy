@@ -21,11 +21,11 @@ const ITEMS: NavItem[] = [
   { key: "settings", labelKey: "settings.title" },
 ];
 
-// Fixed slot width (sized for the longest English label, "Overview"/"Profiles"/
-// "Settings" = 8 chars) plus the button's own left/right padding (0.5rem
-// 0.75rem, App.css:434). Every item shares this width so switching locale
+// Fixed slot width (sized for the longest English label, "Connections" =
+// 11 chars) plus the button's own left/right padding (0.5rem 0.75rem,
+// App.css:434). Every item shares this width so switching locale
 // only swaps the text — the pill never resizes.
-const ITEM_WIDTH = "calc(8ch + 1.5rem)";
+const ITEM_WIDTH = "calc(11ch + 1.5rem)";
 
 interface Props {
   active: NavKey;
