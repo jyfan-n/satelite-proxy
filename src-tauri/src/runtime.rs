@@ -822,10 +822,18 @@ impl Runtime {
             ));
         }
 
-        ensure_listen_port_available(store.settings.mixed_port, "Mixed")?;
+        ensure_listen_port_available_on(
+            store.settings.mixed_port,
+            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            "Mixed",
+        )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
-            ensure_listen_port_available(inb.port, "Inbound")?;
+            ensure_listen_port_available_on(
+                inb.port,
+                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                "Inbound",
+            )?;
         }
 
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::SingBox);
@@ -996,10 +1004,18 @@ impl Runtime {
             );
         }
 
-        ensure_listen_port_available(store.settings.mixed_port, "Mixed")?;
+        ensure_listen_port_available_on(
+            store.settings.mixed_port,
+            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            "Mixed",
+        )?;
         ensure_listen_port_available(store.settings.api_port, "Metrics")?;
         for inb in &store.settings.extra_inbounds {
-            ensure_listen_port_available(inb.port, "Inbound")?;
+            ensure_listen_port_available_on(
+                inb.port,
+                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                "Inbound",
+            )?;
         }
 
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::Xray);
@@ -1155,10 +1171,18 @@ impl Runtime {
             );
         }
 
-        ensure_listen_port_available(store.settings.mixed_port, "Mixed")?;
+        ensure_listen_port_available_on(
+            store.settings.mixed_port,
+            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            "Mixed",
+        )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
-            ensure_listen_port_available(inb.port, "Inbound")?;
+            ensure_listen_port_available_on(
+                inb.port,
+                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                "Inbound",
+            )?;
         }
 
         let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::Mihomo);
@@ -1557,13 +1581,35 @@ impl Default for Runtime {
 }
 
 fn ensure_listen_port_available(port: u16, label: &str) -> AppResult<()> {
+    ensure_listen_port_available_on(port, "127.0.0.1", label)
+}
+
+/// Like `ensure_listen_port_available`, but probes the actual host the core
+/// will bind to. `allow_lan` switches the mixed/extra inbounds from
+/// 127.0.0.1 to 0.0.0.0 (see `config::builder`); a port can be free on
+/// loopback while still failing to bind on all interfaces (another process
+/// already holds 0.0.0.0:<port>, or — on macOS — the binary lacks the Local
+/// Network permission needed to bind a wildcard address). Catching that here
+/// turns an opaque post-spawn crash into a clear pre-flight error instead of
+/// a start/crash cycle.
+fn ensure_listen_port_available_on(port: u16, host: &str, label: &str) -> AppResult<()> {
     if CoreManager::has_port_listener(port) {
         return Err(AppError::Core(format!(
-            "{label} 端口 127.0.0.1:{port} 已被其他程序占用，请关闭冲突程序或修改端口"
+            "{label} 端口 {host}:{port} 已被其他程序占用，请关闭冲突程序或修改端口"
         )));
+    }
+    if host != "127.0.0.1" {
+        std::net::TcpListener::bind((host, port)).map_err(|e| {
+            AppError::Core(format!(
+                "{label} 端口 {host}:{port} 绑定失败：{e}\n\
+                 若已开启「局域网连接」，请检查系统「隐私与安全性 → 本地网络」是否已允许本应用，\n\
+                 或更换端口后重试。"
+            ))
+        })?;
     }
     Ok(())
 }
+
 
 /// Shared BuildOptions for both generators (sing-box and Xray). The api
 /// secret is only consumed by the sing-box clash_api; Xray ignores it.

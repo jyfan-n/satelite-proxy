@@ -364,6 +364,13 @@ export function SettingsPage() {
    * from its own finally when the user edited mid-flight). */
   const autoApplyRef = useRef<() => Promise<void>>(async () => {});
   const applyingRef = useRef(false);
+  /** Bumped by the debounced effect on every draft change; snapshotted at the
+   * start of an apply so `finally` can tell "user edited again while this
+   * attempt was in flight" apart from "this same attempt just failed and
+   * `dirty` is still true because the failed call never landed in `settings`".
+   * Without this, a persistently-failing restart (e.g. LAN bind failure)
+   * retries itself forever with no backoff. */
+  const applyGenerationRef = useRef(0);
   /** Previous tun_enabled value, to detect the off → on transition. */
   const prevTunEnabledRef = useRef<boolean | undefined>(undefined);
 
@@ -421,8 +428,10 @@ export function SettingsPage() {
       seen.add(row.port);
     }
     applyingRef.current = true;
+    const generationAtStart = applyGenerationRef.current;
     setBusy(true);
     setError(null);
+    let succeeded = false;
     try {
       const s = await updateSettings({
         mixedPort,
@@ -442,13 +451,20 @@ export function SettingsPage() {
       if (status?.running) {
         await restartProxy();
       }
+      succeeded = true;
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       applyingRef.current = false;
       setBusy(false);
-      // Pick up edits made while we were applying.
-      void autoApplyRef.current();
+      // Re-queue only if either this attempt landed cleanly (so a still-dirty
+      // draft is a genuinely new edit) or the user changed something else
+      // while it was in flight. A failing attempt whose draft never changes
+      // (e.g. sing-box can't bind the LAN listener) must not retry itself
+      // forever with no backoff — that is the restart-loop bug this guards.
+      if (succeeded || applyGenerationRef.current !== generationAtStart) {
+        void autoApplyRef.current();
+      }
     }
   }, [allowLan, api, apiSecretEnabled, blockQuic, bypassLan, extra, mixed, probe, settings, t, tunIpv6, tunStack]);
 
@@ -458,6 +474,7 @@ export function SettingsPage() {
   // toggles / selects / modal saves settle within the same short window.
   useEffect(() => {
     if (!settings) return;
+    applyGenerationRef.current += 1;
     const timer = setTimeout(() => void autoApplyRef.current(), 600);
     return () => clearTimeout(timer);
     // Fire on any draft change; autoApplyNetwork itself decides if there is
