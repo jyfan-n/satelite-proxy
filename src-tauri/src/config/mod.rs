@@ -9,8 +9,9 @@ mod write;
 mod xray;
 
 pub use builder::{
-    build_singbox_config, generate_api_secret, outbound_tag, rule_set_is_empty_for_config,
-    smart_pool_nodes, BuildOptions,
+    build_singbox_config, chain_hop_outbound_tag, generate_api_secret, outbound_tag,
+    rule_set_is_empty_for_config, smart_pool_nodes, BuildOptions, DIAG_INBOUND_PORT,
+    DIAG_INBOUND_TAG, DIAG_SELECTOR_TAG,
 };
 pub use custom::inspect_singbox_config;
 pub use dns_build::lookup_hosts;

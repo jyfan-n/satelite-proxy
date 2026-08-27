@@ -23,6 +23,9 @@ pub struct SaveRuleInput {
     /// When `target == smart`: name must not contain any keyword.
     #[serde(default)]
     pub smart_exclude: Option<Vec<String>>,
+    /// Required when `target == chain`.
+    #[serde(default)]
+    pub chain_id: Option<String>,
 }
 
 /// Persisting is done; queue one globally debounced restart and return.
@@ -554,6 +557,7 @@ pub fn batch_set_rule_targets(
     node_id: Option<String>,
     smart_include: Option<Vec<String>>,
     smart_exclude: Option<Vec<String>>,
+    chain_id: Option<String>,
 ) -> Result<RuleSet, String> {
     let (set, needs_restart) = state
         .with_store_mut(|store| {
@@ -563,6 +567,7 @@ pub fn batch_set_rule_targets(
                 node_id,
                 smart_include.unwrap_or_default(),
                 smart_exclude.unwrap_or_default(),
+                chain_id,
             )
         })
         .map_err(|e| e.to_string())?;
@@ -634,6 +639,7 @@ pub fn create_rule_set(
     node_id: Option<String>,
     smart_include: Option<Vec<String>>,
     smart_exclude: Option<Vec<String>>,
+    chain_id: Option<String>,
 ) -> Result<RuleSet, String> {
     let set = state
         .with_store_mut(|store| {
@@ -685,12 +691,13 @@ pub fn create_rule_set(
                     node_id,
                     smart_include,
                     smart_exclude,
+                    chain_id,
                 )
             } else {
                 // Local set: an optional initial whole-set route from the
                 // new-set dialog (node/smart carry the set-level pin /
                 // keyword filters; Mixed stays an emergent per-rule state).
-                store.create_local_rule_set(n, target, node_id, smart_include, smart_exclude)
+                store.create_local_rule_set(n, target, node_id, smart_include, smart_exclude, chain_id)
             }
         })
         .map_err(|e| e.to_string())?;
@@ -973,6 +980,27 @@ pub fn save_rule(
                 (Vec::new(), Vec::new())
             };
 
+            let (chain_id, chain_name) = if matches!(effective_target, RuleTarget::Chain) {
+                let cid = input
+                    .chain_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        crate::error::AppError::Config("链路出口需要选择一个链路".into())
+                    })?;
+                let chain = store
+                    .chains
+                    .iter()
+                    .find(|c| c.id == cid)
+                    .ok_or_else(|| {
+                        crate::error::AppError::Config("指定的链路不存在，请重新选择".into())
+                    })?;
+                (Some(chain.id.clone()), Some(chain.name.clone()))
+            } else {
+                (None, None)
+            };
+
             let rule = if let Some(id) = input.id.clone() {
                 if let Some(existing) = set.rules.iter().find(|r| r.id == id) {
                     let mut r = existing.clone();
@@ -984,6 +1012,8 @@ pub fn save_rule(
                     r.node_name = node_name;
                     r.smart_include = smart_include;
                     r.smart_exclude = smart_exclude;
+                    r.chain_id = chain_id;
+                    r.chain_name = chain_name;
                     if let Some(en) = input.enabled {
                         r.enabled = en;
                     }
@@ -995,6 +1025,8 @@ pub fn save_rule(
                     r.node_name = node_name;
                     r.smart_include = smart_include;
                     r.smart_exclude = smart_exclude;
+                    r.chain_id = chain_id;
+                    r.chain_name = chain_name;
                     if let Some(en) = input.enabled {
                         r.enabled = en;
                     }
@@ -1006,7 +1038,9 @@ pub fn save_rule(
                 r.node_name = node_name;
                 r.smart_include = smart_include;
                 r.smart_exclude = smart_exclude;
-                if matches!(input.target, RuleTarget::Smart) {
+                r.chain_id = chain_id;
+                r.chain_name = chain_name;
+                if matches!(input.target, RuleTarget::Smart | RuleTarget::Chain) {
                     r.id = Rule::compute_id(
                         r.rule_type,
                         &r.payload,
@@ -1014,6 +1048,7 @@ pub fn save_rule(
                         None,
                         &r.smart_include,
                         &r.smart_exclude,
+                        r.chain_id.as_deref(),
                     );
                 }
                 if let Some(en) = input.enabled {

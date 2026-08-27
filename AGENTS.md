@@ -208,7 +208,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.4 配置生成（config/）★ 三套独立生成器共享 domain 模型
 
-- `builder.rs` — ★ sing-box 生成器：`ProxyNode[] + AppSettings + RuleSets + DnsSettings → sing-box JSON`（`BuildOptions`）。inbounds（mixed/Clash API/多监听/TUN）、outbounds（含 urltest/手动选择 selector）、route 规则编译都在这里。
+- `builder.rs` — ★ sing-box 生成器：`ProxyNode[] + AppSettings + RuleSets + DnsSettings → sing-box JSON`（`BuildOptions`，含 pools/chains）。inbounds（mixed/Clash API/多监听/TUN）、outbounds（含 urltest/手动选择 selector）、route 规则编译都在这里。节点池 → selector（空池跳过）；代理链 → detour 链（**规则指向末跳=出口，hop[i≥1].detour=hop[i-1]，hop0 由客户端直拨**——方向弄反会导致 [美→港] 链显示美国 IP；正向发射满足先定义后引用；**i≥1 的池跳**必须展开为逐成员克隆 + 链内 selector——共享 selector 的成员无法表达"经前一跳拨出"；**i=0 池跳**复用共享 selector 即正确，客户端直拨）。链路诊断专用出口（**仅存在 ≥1 条可解析链路时**生成）：回环 mixed 入口 `diag-in`（**127.0.0.1:26486**，`DIAG_INBOUND_PORT`）+ `chain-diag` selector（成员=各链出口 tag+direct）+ 置于 sniff 后、用户规则前的 `inbound` 路由规则——`diagnose_chain` 经 Clash API 热切该 selector 后从诊断入口抓 ip.sb，实现**零规则、零重启**的真实出口验证；端口冲突会让内核启动失败并报 26486。
 - `xray.rs` — ★ Xray 生成器（参照 v2rayN `CoreConfig/V2ray/*`）：mixed/tun inbounds + sniffing、vmess/vless(flow)/ss/trojan/socks/http/wireguard outbounds + streamSettings（tls/reality + ws/grpc/http/httpupgrade）、routing（`full:`/`domain:`/关键词/geosite:/geoip:/process 映射、balancer+observatory=kernel 自动选路）、DNS 出口分流（dns-module/direct-dns inboundTag 规则）、stats/metrics（`/debug/vars`）。无 selector 出站——主目标=选中节点 tag 或 balancer，**切节点即重启**。REALITY 仅支持 tcp/grpc 传输（ws 组合在生成期报错跳过）。用户自建远程 `.srs` 集**跳过**（Xray 不识别），内置 3 条映射为 geosite/geoip。`skip-cert-verify` 节点不输出 `allowInsecure`（Xray ≥ 26 已移除该字段，输出会导致整个配置加载失败），证书校验保持开启并记录告警。
 - `mihomo.rs` — ★ mihomo 生成器（Clash YAML，`serde_yaml::Mapping` 保序；字段名以自家 `subscription/clash.rs` 解析器为逆向权威）：ss(+obfs/v2ray-plugin)/vmess(全传输)/vless(REALITY+Vision，uTLS 完整)/trojan/hysteria(2)/tuic/wireguard/anytls/snell/socks5/http/ssh。主组 `proxy`（select，选中节点排首位；kernel 模式=全节点 url-test）保持 sing-box 的 Clash API 契约（热切 `PUT /proxies/proxy`）；filter 池与 smart 池均为 select 组、标签 `smart-<id16>`（应用侧智能切换 PUT 维护）；内置 3 条映射 `GEOSITE,cn`/`GEOIP,cn`/`GEOSITE,geolocation-!cn`；bypass_lan 用显式私有 CIDR；block_quic 用 AND 逻辑规则；DNS 双池（远程 DoH `#proxy` 经代理+国内明文）+ nameserver-policy(+.suffix/geosite:cn)+hosts+fake-ip（TUN 强制）+ `proxy-server-nameserver`；`find-process-mode` 接 AppSettings.find_process（strict/off）；extra_inbounds 走 `listeners`。仅 Naive/Tor/独立 ShadowTls 协议与 ss+shadow-tls 组合被过滤。用户自建 `.srs` 集跳过。
 - `dns_build.rs` — sing-box 1.12+ `dns` 对象：解析器池、统一规则集选解析器、Hosts predefined server、FakeIP。
@@ -252,7 +252,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.8 commands/ 分层（前端 invoke 的直接实现）
 
-`config.rs`（订阅 CRUD/激活/mix、`generate/preview_singbox_config` 按 core_type 分发三生成器，mihomo 返回 YAML 文本；节点列表按 `CoreKind::supports_node` 过滤）、`core.rs`（启停/重启/capture_mode/三内核下载更新/`set_core_type` 切内核/`refresh_geodata` 带 kind 参数——xray 刷 Loyalsoldier .dat、mihomo 刷 MetaCubeX mmdb/GeoSite.dat）、`connections.rs`（连接/请求/失败；`list_connection_changes` 增量协议：带 `lastOrderRevision`，纯计数更新不下发 `order_ids`）、`diagnostics.rs`、`dns.rs`（DNS+hosts）、`latency.rs`、`logs.rs`、`proxy.rs`（状态/系统代理/TUN）、`rules.rs`（规则集 CRUD/排序/远程规则，1167 行）、`subscription.rs`（导入各来源）。command 名与 `src/api.ts` 导出一一对应（snake_case）。
+`config.rs`（订阅 CRUD/激活/mix、`generate/preview_singbox_config` 按 core_type 分发三生成器，mihomo 返回 YAML 文本；节点列表按 `CoreKind::supports_node` 过滤）、`core.rs`（启停/重启/capture_mode/三内核下载更新/`set_core_type` 切内核/`refresh_geodata` 带 kind 参数——xray 刷 Loyalsoldier .dat、mihomo 刷 MetaCubeX mmdb/GeoSite.dat）、`chain.rs`（节点池/链路 CRUD + `list_chain_usage` 规则集引用计数 + `diagnose_chain` 逐跳诊断（单跳/链前缀探测，仅 sing-box、经 Clash delay API），编辑走防抖重启同 rules）、`connections.rs`（连接/请求/失败；`list_connection_changes` 增量协议：带 `lastOrderRevision`，纯计数更新不下发 `order_ids`）、`diagnostics.rs`、`dns.rs`（DNS+hosts）、`latency.rs`、`logs.rs`、`proxy.rs`（状态/系统代理/TUN）、`rules.rs`（规则集 CRUD/排序/远程规则，1167 行）、`subscription.rs`（导入各来源）。command 名与 `src/api.ts` 导出一一对应（snake_case）。
 
 ## 6. 前端模块详解（src/）
 
@@ -284,7 +284,8 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 | `RequestsPage` (258) / `FailuresPage` (510) | 已关闭请求/失败请求日志；Failures 可一键生成封锁规则集 |
 | `LogsPage` (207) | 应用日志查看（1.2s 增量，级别过滤+搜索） |
 | `SettingsPage` (1456) | 6 tab：app/ports/rules/dns/hosts/core；内嵌 Rules/Dns/Hosts 页；三内核行（各自版本/下载/更新，进度事件按 kind 分流）、更新检查、诊断、托盘图标选择、赞助二维码（`DecryptReveal`） |
-| `RulesPage` (2145) | ★ 最大页面：规则集侧栏+编辑器、本地/远程集、策略/DNS 策略、route.final、拖拽排序、远程规则项浏览；geodata 内核（Xray/mihomo）下内置 3 条显示为 geodata 卡（来源/文件按内核区分，更新走 `refresh_geodata(kind)`），自建 .srs 置灰 |
+| `RulesPage` (2145) | ★ 最大页面：规则集侧栏+编辑器、本地/远程集、策略/DNS 策略、route.final、拖拽排序、远程规则项浏览；geodata 内核（Xray/mihomo）下内置 3 条显示为 geodata 卡（来源/文件按内核区分，更新走 `refresh_geodata(kind)`），自建 .srs 置灰；策略可指向 chain（`chain_id`） |
+| `ChainPage` (~1700) | 高密度管理列表，内嵌于 Settings：节点池=单容器紧凑行（名称+关键字+模式pill+计数+引用，行尾 `RowMenu` ⋮ 菜单，复用 rule-menu 范式），链卡=头行徽标（跳数/规则引用/⋮）+ 地铁线 stepper；链路编辑器为 xyflow（`@xyflow/react`）画布：侧栏候选拖入/点击追加（WKWebView 无 HTML5 DnD，用指针事件自实现）、`hopsFromGraph` 单线路径校验（连线时 `isValidConnection` 即时拦截分支/环/自环）、图序号徽标 + 实时有效性状态行、整理布局按钮；fitView 仅在打开已有链路且节点完成测量后执行一次（`useNodesInitialized`），否则画布会因未测量节点算出坏视口而看似空白、或投放后视口跳走 |
 | `DnsPage` (329) / `HostsPage` (463) | DNS/Hosts 管理，通常内嵌于 Settings |
 
 ### 6.4 简洁模式（ui/simple/）
