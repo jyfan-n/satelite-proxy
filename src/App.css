@@ -8443,6 +8443,17 @@ li.virt-pad {
   top: auto;
 }
 
+/* An open ⋮ popover must paint above the cards that follow it: .card's
+   deliberate isolation (navbar-repaint fix, see .card) traps the popover's
+   z-index inside that card's own stacking context, so later sibling cards
+   would cover it. Lift the whole source card while its menu is open — the
+   same :has idiom the DNS panels use. */
+.chain-card:has(.chain-menu-pop),
+.chain-pool-list:has(.chain-menu-pop) {
+  position: relative;
+  z-index: 30;
+}
+
 /* Live keyword-filter feedback in the pool editor: match count + a one-line
    preview of the first few matched node names (full list in the tooltip). */
 .chain-pool-match {
