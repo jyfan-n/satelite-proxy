@@ -251,9 +251,9 @@ fn diagnose_setuid_failure(core: &Path) -> String {
         .ok()
         .and_then(|out| {
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            text.lines().last().and_then(|line| {
-                line.split_whitespace().last().map(str::to_string)
-            })
+            text.lines()
+                .last()
+                .and_then(|line| line.split_whitespace().last().map(str::to_string))
         });
 
     let Some(mount_point) = mount_point else {
@@ -270,9 +270,8 @@ fn diagnose_setuid_failure(core: &Path) -> String {
         .ok()
         .map(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
-            text.lines().any(|l| {
-                l.trim_start().starts_with("Owners:") && l.contains("Disabled")
-            })
+            text.lines()
+                .any(|l| l.trim_start().starts_with("Owners:") && l.contains("Disabled"))
         })
         .unwrap_or(false);
     if ignores_ownership {
@@ -292,9 +291,8 @@ fn diagnose_setuid_failure(core: &Path) -> String {
         .ok()
         .map(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
-            text.lines().any(|l| {
-                l.contains(&format!(" on {mount_point} ")) && l.contains("nosuid")
-            })
+            text.lines()
+                .any(|l| l.contains(&format!(" on {mount_point} ")) && l.contains("nosuid"))
         })
         .unwrap_or(false);
     if nosuid {

@@ -182,12 +182,14 @@ pub fn resolve_pending_elevation(
 ) -> Option<PathBuf> {
     let (kind, tun_enabled) = match store.settings.runtime_source() {
         RuntimeSource::Singbox { id } => {
-            let content = store.subscriptions.iter().find(|s| s.id == id).and_then(
-                |s| match &s.source {
+            let content = store
+                .subscriptions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| match &s.source {
                     SubscriptionSource::Singbox { content } => Some(content.clone()),
                     _ => None,
-                },
-            )?;
+                })?;
             let insight = inspect_singbox_config(&content);
             (CoreKind::SingBox, insight.has_tun)
         }
@@ -856,14 +858,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1012,14 +1022,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Metrics")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1194,14 +1212,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1601,7 +1627,6 @@ fn ensure_listen_port_available_on(port: u16, host: &str, label: &str) -> AppRes
     }
     Ok(())
 }
-
 
 /// Shared BuildOptions for both generators (sing-box and Xray). The api
 /// secret is only consumed by the sing-box clash_api; Xray ignores it.
