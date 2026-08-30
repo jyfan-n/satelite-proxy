@@ -1788,9 +1788,19 @@ tr.row-active {
   flex-shrink: 0;
 }
 
-.app-bar-ver .ver-ver {
+/* Current + latest are twin label/value columns: give both values identical
+   metrics so the pair reads as one aligned row (they used to diverge — 1.08rem
+   vs the late .mono rule's 0.78rem). The shared line-height stays taller than
+   the status pill so the latest column keeps the same height (and thus stays
+   centered in line) whether or not a pill is showing. */
+.app-bar-ver .ver-ver,
+.app-bar-latest .ver-stat {
   justify-content: flex-start;
-  font-size: 1.08rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .app-bar-actions {
