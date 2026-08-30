@@ -1,7 +1,7 @@
 # AGENTS.md — Satelite Proxy 项目地图
 
 面向 AI agent 的项目速查文档。读完本文即可定位绝大多数代码，无需重复探索。
-最后核对：2026-08-30（v1.0.9，三内核：sing-box / Xray / mihomo；新增 Xray 副进程按协议委托，见 §9.20。内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2）。
+最后核对：2026-08-30（v1.0.9，三内核：sing-box / Xray / mihomo；新增首页「网络探测」卡=延迟+出口 IP 竞速探测，见 §5.6/§5.8/§6.3。Xray 副进程按协议委托见 §9.20；内核意外退出修复：watchdog 真重启 + `core-status-changed` 事件 + 启动就绪须实测 mixed 端口拨号，见 §5.1/§5.6/§6.2）。
 
 ## 0. 阅读与维护规则（必读）
 
@@ -237,6 +237,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 - `services/latency.rs` — 测速：TCP 协议直连 server:port（内核无关）；UDP 系协议（hysteria2/tuic）走 Clash delay API（sing-box/mihomo 有此 API；Xray 模式下此类节点本就不被支持）。批量探测按输入顺序起测（并发槽空出即从前向后补位）；`probe_nodes_streaming`/`ping_nodes_streaming` 带 `on_result` 回调，每个探测完成即刻回调（commands/latency.rs 据此经 Tauri `Channel<LatencyResult>` 逐节点推给前端）。探测共享结果缓存（成功 30s / 失败 15s，per-key 在途合并；**这也是 smart_switch 后台排序/健康探测读的缓存**）；手动触发的三个测速 command 一律 `use_cache=false`——不读缓存每次真测，结果仍写回缓存供后台复用（2026-08）。
 - `services/import.rs` — 订阅 URL 去重键、导入文件读取。
 - `services/dns_diag.rs` — ★ 内核级 DNS 诊断（DNS 页「诊断」，command `diagnose_dns`）：双层设计——① 实时查询：sing-box/mihomo 经 `ClashApi::dns_query`（`GET /dns/query?name=&type=A`，sing-box 走完整 DNS 规则链、两内核响应同构且都不返回上游 server）；② 路径推演：`DnsPathAnalyzer` 在应用侧复刻三生成器的决策链（规则集 stored order → Hosts → DNS 页规则 → FakeIP → dns_final，含 §18 分歧点：mihomo 关键词回落 nameserver、Block 集仅 sing-box 拒绝 DNS、xray/mihomo 跳过用户 .srs、内置 geosite 集按本地 .srs 缓存近似判定 approx）。远程集匹配复用 `srs.rs`/source JSON，缓存路径校验同 `list_remote_rule_items`。Xray 无 DNS API → 仅路径推演 + query_note 说明。
+- `services/exit_ip.rs` — 出口 IP 探测（首页「网络探测」卡，command `check_exit_ip`，2026-08）：4 个公共 IP API（api.ip.sb/geoip、ipwho.is、ip-api.com、api.myip.com）`spawn_blocking` 并发竞速、mpsc 收首个成功，其余靠 ureq 超时（connect 5s/总 9s）自行收敛，整体 12s 兜底；浏览器 UA（ip.sb 会 403 裸客户端）。`via_proxy=true` 时 agent 挂 `ureq::Proxy` 指向 `127.0.0.1:<mixed_port>`（三内核的 mixed 入站都支持 HTTP 代理语义，请求按用户规则出站→答案即当前出口）；内核未运行或 `outbound_mode=direct` 时直连探测（返回本机公网 IP）。解析器归一化各源 JSON 字段差异（`parse_source` 有单测）。前端 `DashboardPage` 点击卡片同时刷新延迟+出口 IP，并在 statusReady 后按 `running:nodeId` 键变化（内核启停边沿/节点切换）自动重探，版本号防过期结果覆盖。
 - `srs.rs` — `.srs` 二进制规则集结构解析（LOUDS trie），供列表/计数/校验（`list_remote_rule_items` 的后端；固定用 sing-box 二进制 decompile）。
 - `smart_switch.rs` / `rule_apply.rs` / `remote_rule_auto.rs` / `builtin_remote_rules.rs` — 见 5.1。smart_switch 在 Xray 模式禁用（依赖连接日志；mihomo 有连接日志不受限）。
 - `conn_journal.rs` — 连接日志（活跃快照 + 已关闭请求历史 + 失败请求），`list_connections/list_connection_changes/list_requests/list_request_failures` 的数据源；Xray 模式降级为 metrics 轮询（仅流量）；mihomo 模式与 sing-box 同款全量。
@@ -253,7 +254,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 ### 5.8 commands/ 分层（前端 invoke 的直接实现）
 
-`config.rs`（订阅 CRUD/激活/mix、`generate/preview_singbox_config` 按 core_type 分发三生成器，mihomo 返回 YAML 文本；节点列表按 `CoreKind::supports_node` 过滤）、`core.rs`（启停/重启/capture_mode/三内核下载更新/`set_core_type` 切内核/`refresh_geodata` 带 kind 参数——xray 刷 Loyalsoldier .dat、mihomo 刷 MetaCubeX mmdb/GeoSite.dat）、`chain.rs`（节点池/链路 CRUD + `list_chain_usage` 规则集引用计数 + `diagnose_chain` 逐跳诊断（单跳/链前缀探测，仅 sing-box、经 Clash delay API），编辑走防抖重启同 rules）、`connections.rs`（连接/请求/失败；`list_connection_changes` 增量协议：带 `lastOrderRevision`，纯计数更新不下发 `order_ids`）、`diagnostics.rs`、`dns.rs`（DNS+hosts 设置 CRUD、`diagnose_dns` 内核级 DNS 诊断→services/dns_diag）、`latency.rs`、`logs.rs`（`list/clear_app_logs` + `get_core_log_tail(limit, kind)`——按 kind 读对应内核的 `logs/<prefix>-<hour>.log`，多核模式主核/副进程分开，`Runtime::core_log_tail_for`）、`proxy.rs`（状态/系统代理/TUN）、`rules.rs`（规则集 CRUD/排序/远程规则，1167 行）、`subscription.rs`（导入各来源）。command 名与 `src/api.ts` 导出一一对应（snake_case）。
+`config.rs`（订阅 CRUD/激活/mix、`generate/preview_singbox_config` 按 core_type 分发三生成器，mihomo 返回 YAML 文本；节点列表按 `CoreKind::supports_node` 过滤）、`core.rs`（启停/重启/capture_mode/三内核下载更新/`set_core_type` 切内核/`refresh_geodata` 带 kind 参数——xray 刷 Loyalsoldier .dat、mihomo 刷 MetaCubeX mmdb/GeoSite.dat）、`chain.rs`（节点池/链路 CRUD + `list_chain_usage` 规则集引用计数 + `diagnose_chain` 逐跳诊断（单跳/链前缀探测，仅 sing-box、经 Clash delay API），编辑走防抖重启同 rules）、`connections.rs`（连接/请求/失败；`list_connection_changes` 增量协议：带 `lastOrderRevision`，纯计数更新不下发 `order_ids`）、`diagnostics.rs`（`diagnose_network` 检测、`check_exit_ip` 出口 IP 竞速探测→services/exit_ip）、`dns.rs`（DNS+hosts 设置 CRUD、`diagnose_dns` 内核级 DNS 诊断→services/dns_diag）、`latency.rs`、`logs.rs`（`list/clear_app_logs` + `get_core_log_tail(limit, kind)`——按 kind 读对应内核的 `logs/<prefix>-<hour>.log`，多核模式主核/副进程分开，`Runtime::core_log_tail_for`）、`proxy.rs`（状态/系统代理/TUN）、`rules.rs`（规则集 CRUD/排序/远程规则，1167 行）、`subscription.rs`（导入各来源）。command 名与 `src/api.ts` 导出一一对应（snake_case）。
 
 ## 6. 前端模块详解（src/）
 
@@ -277,7 +278,7 @@ React UI ──invoke()──▶ commands/* ──▶ AppState ──▶ storage
 
 | 页面 | 要点 |
 |---|---|
-| `DashboardPage` (1399 行) | 启停/重启、capture/出站模式快控、节点选择、配置预览弹窗（按内核显示 JSON/YAML）、60 样本迷你图、LAN IP、版本（并行三内核 info）；hero ⋯ 指定内核子菜单（三选项） |
+| `DashboardPage` (1399 行) | 启停/重启、capture/出站模式快控、节点选择、配置预览弹窗（按内核显示 JSON/YAML）、60 样本迷你图、LAN IP、版本（并行三内核 info）；「网络探测」卡（点击=刷新当前节点延迟+出口 IP 竞速探测，`running:nodeId` 边沿自动重探，见 §5.6 `services/exit_ip.rs`）；hero ⋯ 指定内核子菜单（三选项） |
 | `ConfigPage` (831) | 订阅卡片（流量配额条）、排他选择/Mix、`AddConfigModal`、深链预填（`useImportIntent`） |
 | `NodesPage` (464) | 列表/网格（`useVirtualRange`×2）、搜索排序测速（批量测速按当前排序下发 ids，后端逐节点流式回传、rAF 合帧就地刷新，见 §7 改测速）、改名、custom 配置节点；切节点 `waitForCoreRestart` |
 | `TrafficPage` (~70) | 三 tab 容器：实时连接 / 请求历史 / 失败请求；Xray 模式下三 tab 降级为空态，页首提示改指向「日志 → 内核日志」（原内嵌日志视图已移除，避免与 LogsPage 重复） |

@@ -28,6 +28,7 @@ import type {
   SubscriptionView,
   DnsSettings,
   DnsDiagnosisReport,
+  ExitIpInfo,
   HostsEntry,
 } from "./types";
 import { trackCoreBusy } from "./coreBusy";
@@ -281,6 +282,13 @@ export function getSettings() {
  * Never mutates system settings. */
 export function diagnoseNetwork() {
   return invoke<import("./types").NetworkDiagnosticsResult>("diagnose_network");
+}
+
+/** Exit-IP probe for the dashboard network-probe card: races a few public
+ * IP APIs through the core's mixed inbound (direct when the core is
+ * stopped / Direct outbound mode); first answer wins. */
+export function checkExitIp() {
+  return invoke<ExitIpInfo>("check_exit_ip");
 }
 
 export interface SettingsUpdatePayload {

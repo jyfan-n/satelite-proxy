@@ -392,6 +392,7 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::diagnose_network,
+            commands::check_exit_ip,
             commands::regenerate_api_secret,
             commands::set_current_node,
             commands::rename_node,

@@ -5441,6 +5441,35 @@ tr.dns-diag-tr:hover {
   color: var(--muted);
 }
 
+/* Exit-IP row of the network-probe card: keep long IPv6 answers on one
+   line, country code + direct badge trail after the address. */
+.instrument-kv .kv-v.exit-ip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: calc(100% - 4.55rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.instrument-kv .kv-v.exit-ip .lat-spinner {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+
+.exit-ip-direct {
+  flex: none;
+  font-size: 0.6rem;
+  line-height: 1;
+  padding: 0.14rem 0.3rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  color: var(--warning);
+}
+
 .kv-v-badge {
   margin-left: 0.35rem;
 }

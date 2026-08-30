@@ -229,6 +229,16 @@ export interface LatencyBatchResult {
   method?: string;
 }
 
+/** Winner of the exit-IP probe race (see `services/exit_ip.rs`). */
+export interface ExitIpInfo {
+  ip: string;
+  countryCode?: string | null;
+  /** Fetched through the core's mixed inbound; false = probed direct. */
+  viaProxy: boolean;
+  /** Which public IP API answered, for diagnostics. */
+  source: string;
+}
+
 export type AddSourceKind = "url" | "file" | "text" | "node" | "singbox";
 
 export type ProfileKind = "subscription" | "local" | "singbox";
