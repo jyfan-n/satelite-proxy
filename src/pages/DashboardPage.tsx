@@ -8,8 +8,10 @@ import {
   getSubscription,
   listAllNodes,
   listSubscriptions,
+  onProxySnapshot,
   peekProxyStatus,
   previewSingboxConfig,
+  refreshProxyStatus,
   restartProxy,
   peekSettings,
   setCoreType,
@@ -360,7 +362,11 @@ function coreDisplayName(kind: string | null | undefined): string {
     null,
   );
 
-  const onCaptureError = useCallback((msg: string) => {
+  // Shared error sink for capture switches AND start/stop/restart: surface
+  // the message, and for TUN permission failures offer one-click
+  // re-authorization instead of leaving the user to guess which switch
+  // fixes a setuid/UAC failure.
+  const reportOpError = useCallback((msg: string) => {
     setError(msg);
     setErrorAction(
       isTunPermissionError(msg)
@@ -385,10 +391,22 @@ function coreDisplayName(kind: string | null | undefined): string {
   const { captureMode, captureBusy, requestCaptureMode } = useCaptureModeSwitch(
     proxy,
     setProxy,
-    onCaptureError,
+    reportOpError,
     onCaptureApplied,
   );
   requestCaptureModeRef.current = requestCaptureMode;
+
+  // Watchdog push (`core-status-changed` → refreshProxyStatus): resync the
+  // moment the backend observes a lifecycle edge (unexpected exit, auto
+  // revival) instead of waiting for the next 1s poll tick — which skips
+  // entirely while a capture switch is in flight.
+  useEffect(() => {
+    return onProxySnapshot((s) => {
+      setProxy(s);
+      pushSpark(s);
+      setPendingCore(peekSettings()?.core_type ?? s.core_type ?? null);
+    });
+  }, [pushSpark]);
 
   useVisibleInterval(() => {
     // Do not clobber optimistic capture UI while a switch is in flight.
@@ -469,7 +487,10 @@ function coreDisplayName(kind: string | null | undefined): string {
       setProxy(s);
       await reload();
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      reportOpError(typeof e === "string" ? e : String(e));
+      // A failed start leaves the backend in Error; resync immediately so
+      // the status card cannot linger on a stale/starting state.
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }
@@ -575,7 +596,8 @@ function coreDisplayName(kind: string | null | undefined): string {
       const s = await stopProxy();
       setProxy(s);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      reportOpError(typeof e === "string" ? e : String(e));
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }
@@ -589,7 +611,8 @@ function coreDisplayName(kind: string | null | undefined): string {
       const s = await restartProxy();
       setProxy(s);
     } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
+      reportOpError(typeof e === "string" ? e : String(e));
+      void refreshProxyStatus();
     } finally {
       setBusy(false);
     }
