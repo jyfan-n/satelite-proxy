@@ -189,12 +189,16 @@ export function NodesPage() {
     localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
   }, [clickTest]);
 
-  // Grouping: subscription / protocol / country (persisted like viewMode).
+  // Grouping: default (flat) / subscription / protocol / country, persisted
+  // like viewMode. v2 key: the first iteration persisted "sub" as its
+  // default — the feature is unreleased, so bump the key to let every
+  // profile start on the new "default = flat" preference.
   const [groupBy, setGroupBy] = useState<GroupBy>(
-    () => (localStorage.getItem("nodes.groupBy") as GroupBy) || "none",
+    () =>
+      (localStorage.getItem("nodes.groupBy.v2") as GroupBy | null) || "none",
   );
   useEffect(() => {
-    localStorage.setItem("nodes.groupBy", groupBy);
+    localStorage.setItem("nodes.groupBy.v2", groupBy);
   }, [groupBy]);
 
   const displayed = nodes;
