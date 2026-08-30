@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   generateSingboxConfig,
   getProxyStatus,
@@ -14,6 +14,7 @@ import {
 import { GlassButton } from "../components/GlassButton";
 import { ErrorModal } from "../components/ErrorModal";
 import { useI18n } from "../i18n";
+import { groupNodes, type GroupBy } from "../nodeGroups";
 import { GlassSeg } from "../components/GlassSeg";
 import { waitForCoreRestart } from "../coreBusy";
 import { useVirtualRange } from "../hooks/useVirtualRange";
@@ -24,6 +25,15 @@ const VIRTUALIZE_AFTER = 200;
 const LIST_ROW_HEIGHT = 49;
 const GRID_ROW_HEIGHT = 94;
 const PAGE_SIZE = 200;
+
+/** Flat render items for the grouped list (headers share the row height so
+ *  the fixed-size virtualizer math stays exact). */
+type ListItem =
+  | { type: "group"; label: string; flag?: string; count: number }
+  | { type: "node"; n: ProxyNode };
+/** Grid variant: a full-width header occupies one cell slot and pads the rest
+ *  of its row with fillers so subsequent cards stay aligned. */
+type GridItem = ListItem | { type: "filler" };
 
 function gridColumns() {
   if (window.innerWidth <= 720) return 2;
@@ -75,7 +85,7 @@ function latencyClass(ms?: number | null) {
 }
 
 export function NodesPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [nodes, setNodes] = useState<ProxyNode[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -181,15 +191,65 @@ export function NodesPage() {
     localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
   }, [clickTest]);
 
+  // Grouping: subscription / protocol / country (persisted like viewMode).
+  const [groupBy, setGroupBy] = useState<GroupBy>(
+    () => (localStorage.getItem("nodes.groupBy") as GroupBy) || "sub",
+  );
+  useEffect(() => {
+    localStorage.setItem("nodes.groupBy", groupBy);
+  }, [groupBy]);
+
   const displayed = nodes;
+
+  // Flat render items: group headers interleave with nodes at the same fixed
+  // heights the virtualizer assumes (headers in the grid span the full row,
+  // padded with filler cells to keep the per-cell math exact).
+  const groups = useMemo(
+    () =>
+      groupNodes(displayed, groupBy, locale, {
+        other: t("nodes.groupOther"),
+        noSub: t("nodes.groupNoSub"),
+      }),
+    [displayed, groupBy, locale, t],
+  );
+
+  const listItems = useMemo(() => {
+    const out: ListItem[] = [];
+    for (const g of groups) {
+      out.push({
+        type: "group",
+        label: g.label,
+        flag: g.flag,
+        count: g.nodes.length,
+      });
+      for (const n of g.nodes) out.push({ type: "node", n });
+    }
+    return out;
+  }, [groups]);
+
+  const gridItems = useMemo(() => {
+    const out: GridItem[] = [];
+    for (const g of groups) {
+      out.push({
+        type: "group",
+        label: g.label,
+        flag: g.flag,
+        count: g.nodes.length,
+      });
+      for (let i = 1; i < columnCount; i++) out.push({ type: "filler" });
+      for (const n of g.nodes) out.push({ type: "node", n });
+    }
+    return out;
+  }, [groups, columnCount]);
+
   const virtualized = displayed.length > VIRTUALIZE_AFTER;
   const listRange = useVirtualRange({
-    itemCount: displayed.length,
+    itemCount: listItems.length,
     itemSize: LIST_ROW_HEIGHT,
     enabled: virtualized,
   });
   const gridRange = useVirtualRange({
-    itemCount: displayed.length,
+    itemCount: gridItems.length,
     itemSize: GRID_ROW_HEIGHT,
     itemsPerRow: columnCount,
     enabled: virtualized,
@@ -336,7 +396,129 @@ export function NodesPage() {
     }
   }
 
+  /** Group header row (list): full-width cell at ROW_H for the virtualizer. */
+  function renderGroupRow(key: string, label: string, flag: string | undefined, count: number) {
+    return (
+      <tr key={key} className="node-group-row">
+        <td colSpan={6}>
+          <span className="node-group-label">
+            {flag ? <span className="node-group-flag">{flag}</span> : null}
+            {label}
+          </span>
+          <span className="node-group-count mono">{count}</span>
+        </td>
+      </tr>
+    );
+  }
+
+  /** Group header band (grid): spans all columns at GRID_ROW_HEIGHT. */
+  function renderGroupHead(key: string, label: string, flag: string | undefined, count: number) {
+    return (
+      <div key={key} className="node-group-head" style={{ height: GRID_ROW_HEIGHT }}>
+        <span className="node-group-label">
+          {flag ? <span className="node-group-flag">{flag}</span> : null}
+          {label}
+        </span>
+        <span className="node-group-count mono">{count}</span>
+      </div>
+    );
+  }
+
+  function renderNodeRow(n: ProxyNode) {
+                const active = n.id === currentId;
+                const isTesting = testingIds.has(n.id);
+                return (
+                  <tr
+                    key={n.id}
+                    className={`node-virtual-row ${active ? "row-active" : ""}`}
+                    onClick={
+                      customRuntime
+                        ? undefined
+                        : clickTest
+                          ? () => void onTestOne(n.id)
+                          : () => void onSelect(n.id)
+                    }
+                    style={{ cursor: customRuntime ? "default" : "pointer" }}
+                    title={
+                      !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
+                    }
+                  >
+                    <td>{active ? "●" : "○"}</td>
+                    <td>
+                      <div className="node-list-name">{n.name}</div>
+                      {n.subscription_name ? (
+                        <div className="node-sub-label" title={n.subscription_name}>
+                          {n.subscription_name}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td>
+                      <code>{n.protocol}</code>
+                      {delegatedProtocols.has(n.protocol) ? (
+                        <span className="pill sidecar-tag">Xray</span>
+                      ) : null}
+                    </td>
+                    <td>{n.server}</td>
+                    <td>{n.port}</td>
+                    <td className="node-list-latency">
+                      <LatencyDisplay
+                        ms={n.latency_ms}
+                        latencyAt={n.latency_at}
+                        testing={isTesting}
+                        unsupported={unsupportedIds.has(n.id)}
+                        unsupportedLabel={pingNote}
+                      />
+                    </td>
+                  </tr>
+                );
+  }
+
+  function renderNodeCard(n: ProxyNode) {
+              const active = n.id === currentId;
+              const isTesting = testingIds.has(n.id);
+              return (
+                <button
+                  key={n.id}
+                  type="button"
+                  className={`node-card ${active ? "active" : ""}`}
+                  onClick={() => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
+                  disabled={customRuntime || busyId === n.id}
+                  title={
+                    !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
+                  }
+                >
+                  <div className="node-card-top">
+                    <span className="node-dot">{active ? "●" : "○"}</span>
+                    <div className="node-card-meta">
+                      <code>{n.protocol}</code>
+                      {delegatedProtocols.has(n.protocol) ? (
+                        <span className="pill sidecar-tag">Xray</span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="node-card-name" title={n.name}>
+                    {n.name}
+                  </div>
+                  <div className="node-card-footer">
+                    <span className="node-sub-label" title={n.subscription_name ?? ""}>
+                      {n.subscription_name}
+                    </span>
+                    <span className="node-card-latency">
+                      <LatencyDisplay
+                        ms={n.latency_ms}
+                        latencyAt={n.latency_at}
+                        testing={isTesting}
+                        unsupported={unsupportedIds.has(n.id)}
+                        unsupportedLabel={pingNote}
+                      />
+                    </span>
+                  </div>
+                </button>
+              );
+  }
+
   return (
+
     <div className="page nodes-page">
       {customRuntime && (
         <div className="banner" role="status">
@@ -360,6 +542,16 @@ export function NodesPage() {
           </p>
         </div>
         <div className="header-actions nodes-toolbar">
+          <GlassSeg
+            value={groupBy}
+            ariaLabel={t("nodes.groupBy")}
+            onChange={(v) => setGroupBy(v as GroupBy)}
+            options={[
+              { value: "sub", label: t("nodes.groupSub") },
+              { value: "proto", label: t("nodes.groupProto") },
+              { value: "country", label: t("nodes.groupCountry") },
+            ]}
+          />
           <input
             autoCapitalize="off"
             autoCorrect="off"
@@ -475,54 +667,20 @@ export function NodesPage() {
                   <td colSpan={6} style={{ height: listRange.paddingTop }} />
                 </tr>
               )}
-              {displayed.slice(listRange.start, listRange.end).map((n) => {
-                const active = n.id === currentId;
-                const isTesting = testingIds.has(n.id);
-                return (
-                  <tr
-                    key={n.id}
-                    className={`node-virtual-row ${active ? "row-active" : ""}`}
-                    onClick={
-                      customRuntime
-                        ? undefined
-                        : clickTest
-                          ? () => void onTestOne(n.id)
-                          : () => void onSelect(n.id)
-                    }
-                    style={{ cursor: customRuntime ? "default" : "pointer" }}
-                    title={
-                      !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
-                    }
-                  >
-                    <td>{active ? "●" : "○"}</td>
-                    <td>
-                      <div className="node-list-name">{n.name}</div>
-                      {n.subscription_name ? (
-                        <div className="node-sub-label" title={n.subscription_name}>
-                          {n.subscription_name}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td>
-                      <code>{n.protocol}</code>
-                      {delegatedProtocols.has(n.protocol) ? (
-                        <span className="pill sidecar-tag">Xray</span>
-                      ) : null}
-                    </td>
-                    <td>{n.server}</td>
-                    <td>{n.port}</td>
-                    <td className="node-list-latency">
-                      <LatencyDisplay
-                        ms={n.latency_ms}
-                        latencyAt={n.latency_at}
-                        testing={isTesting}
-                        unsupported={unsupportedIds.has(n.id)}
-                        unsupportedLabel={pingNote}
-                      />
-                    </td>
-                  </tr>
-                );
-              })}
+              {listItems
+                .slice(listRange.start, listRange.end)
+                .map((item, i) =>
+                  item.type === "group" ? (
+                    renderGroupRow(
+                      `g-${listRange.start + i}`,
+                      item.label,
+                      item.flag,
+                      item.count,
+                    )
+                  ) : (
+                    renderNodeRow(item.n)
+                  ),
+                )}
               {listRange.paddingBottom > 0 && (
                 <tr className="node-virtual-spacer" aria-hidden="true">
                   <td colSpan={6} style={{ height: listRange.paddingBottom }} />
@@ -542,49 +700,20 @@ export function NodesPage() {
           <div
             className={`node-grid ${virtualized ? "node-grid-virtual" : ""}${clickTest ? " spot-armed" : ""}`}
           >
-            {displayed.slice(gridRange.start, gridRange.end).map((n) => {
-              const active = n.id === currentId;
-              const isTesting = testingIds.has(n.id);
-              return (
-                <button
-                  key={n.id}
-                  type="button"
-                  className={`node-card ${active ? "active" : ""}`}
-                  onClick={() => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
-                  disabled={customRuntime || busyId === n.id}
-                  title={
-                    !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
-                  }
-                >
-                  <div className="node-card-top">
-                    <span className="node-dot">{active ? "●" : "○"}</span>
-                    <div className="node-card-meta">
-                      <code>{n.protocol}</code>
-                      {delegatedProtocols.has(n.protocol) ? (
-                        <span className="pill sidecar-tag">Xray</span>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="node-card-name" title={n.name}>
-                    {n.name}
-                  </div>
-                  <div className="node-card-footer">
-                    <span className="node-sub-label" title={n.subscription_name ?? ""}>
-                      {n.subscription_name}
-                    </span>
-                    <span className="node-card-latency">
-                      <LatencyDisplay
-                        ms={n.latency_ms}
-                        latencyAt={n.latency_at}
-                        testing={isTesting}
-                        unsupported={unsupportedIds.has(n.id)}
-                        unsupportedLabel={pingNote}
-                      />
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
+            {gridItems
+              .slice(gridRange.start, gridRange.end)
+              .map((item, i) => {
+                if (item.type === "group")
+                  return renderGroupHead(
+                    `g-${gridRange.start + i}`,
+                    item.label,
+                    item.flag,
+                    item.count,
+                  );
+                if (item.type === "filler")
+                  return <div key={`f-${gridRange.start + i}`} aria-hidden />;
+                return renderNodeCard(item.n);
+              })}
           </div>
           {gridRange.paddingBottom > 0 && (
             <div style={{ height: gridRange.paddingBottom }} aria-hidden="true" />
