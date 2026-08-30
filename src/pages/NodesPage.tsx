@@ -381,9 +381,10 @@ export function NodesPage() {
             ]}
           />
 
+          {/* Monochrome text glyphs (same family as ↻ / + elsewhere) — they
+              follow the button color instead of rendering as color emoji. */}
           <GlassButton
-            variant="primary"
-            icon="⚡"
+            icon="◉"
             disabled={testing || displayed.length === 0}
             onClick={() => void onTest("real")}
             title={t("nodes.testRealLatencyHint")}
@@ -394,7 +395,7 @@ export function NodesPage() {
               direct-TCP path (extracted nodes have no kernel mapping). */}
           {!customRuntime && (
             <GlassButton
-              icon="📶"
+              icon="∿"
               disabled={testing || displayed.length === 0}
               onClick={() => void onTest("ping")}
               title={t("nodes.pingTestHint")}
@@ -402,17 +403,23 @@ export function NodesPage() {
               {testing && testKind === "ping" ? t("nodes.pinging") : t("nodes.pingTest")}
             </GlassButton>
           )}
-          {/* Click-test toggle: accent-tinted while enabled, and the label
-              itself states the behavior ("Click = test latency"). Meaningless
-              in custom mode (rows are not clickable there) — hidden with ping. */}
+          {/* 单点测试 toggle: state reads from the LED dot alone — gray
+              while off, green while armed (same LED language as the logs
+              page kernel tabs). Label stays constant in both states.
+              Meaningless in custom mode (rows are not clickable there) —
+              hidden with ping. */}
           {!customRuntime && (
             <GlassButton
-              icon="👆"
-              variant={clickTest ? "primary" : "plain"}
+              icon={
+                <span
+                  className={`seg-dot${clickTest ? " on" : ""}`}
+                  aria-hidden
+                />
+              }
               onClick={() => setClickTest((v) => !v)}
               title={t("nodes.clickTestHint")}
             >
-              {clickTest ? t("nodes.clickTestOn") : t("nodes.clickTest")}
+              {t("nodes.clickTest")}
             </GlassButton>
           )}
 
@@ -436,14 +443,6 @@ export function NodesPage() {
         <div className="banner busy" role="status">
           <span className="lat-spinner" aria-hidden />
           {t("nodes.switchingManual")}
-        </div>
-      )}
-
-      {/* Persistent mode reminder right above the list, so the changed click
-          behavior is visible without hovering anything. */}
-      {clickTest && !customRuntime && (
-        <div className="banner" role="status">
-          {t("nodes.clickTestBanner")}
         </div>
       )}
 
