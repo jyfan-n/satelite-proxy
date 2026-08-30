@@ -457,7 +457,7 @@ export function NodesPage() {
             : "—"}
         </div>
       ) : viewMode === "list" ? (
-        <div className="card table-wrap">
+        <div className={`card table-wrap${clickTest ? " spot-armed" : ""}`}>
           <table>
             <thead>
               <tr>
@@ -539,7 +539,9 @@ export function NodesPage() {
           {gridRange.paddingTop > 0 && (
             <div style={{ height: gridRange.paddingTop }} aria-hidden="true" />
           )}
-          <div className={`node-grid ${virtualized ? "node-grid-virtual" : ""}`}>
+          <div
+            className={`node-grid ${virtualized ? "node-grid-virtual" : ""}${clickTest ? " spot-armed" : ""}`}
+          >
             {displayed.slice(gridRange.start, gridRange.end).map((n) => {
               const active = n.id === currentId;
               const isTesting = testingIds.has(n.id);
