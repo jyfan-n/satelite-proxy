@@ -26,20 +26,26 @@ const LIST_ROW_HEIGHT = 49;
 const GRID_ROW_HEIGHT = 94;
 const PAGE_SIZE = 200;
 
-/** Flat render items for the grouped list (headers share the row height so
- *  the fixed-size virtualizer math stays exact). */
-type ListItem =
-  | { type: "group"; label: string; flag?: string; count: number }
-  | { type: "node"; n: ProxyNode };
-/** Grid variant: a full-width header occupies one cell slot and pads the rest
- *  of its row with fillers so subsequent cards stay aligned. */
-type GridItem = ListItem | { type: "filler" };
+/** Slim group header band height (px). */
+const NODE_GROUP_H = 30;
+/** .node-grid row gap (0.65rem) — a spanning header row is followed by the
+ *  gap before the next card row, so its pitch includes it. */
+const GRID_GAP = 10.4;
 
-function gridColumns() {
-  if (window.innerWidth <= 720) return 2;
-  if (window.innerWidth <= 960) return 3;
-  return 4;
-}
+/** Flat render items with per-item heights: the virtualizer runs in pixel
+ *  space (itemSize=1) and a prefix-offset window maps px → items, which
+ *  keeps slim headers + collapsible groups exact. */
+type ListItem =
+  | {
+      type: "group";
+      key: string;
+      label: string;
+      flag?: string;
+      count: number;
+      h: number;
+    }
+  | { type: "node"; n: ProxyNode; h: number };
+type GridItem = ListItem;
 
 /** Render latency cell: spinner / ms / timeout / needs-core / dash */
 function LatencyDisplay({
@@ -124,14 +130,6 @@ export function NodesPage() {
   const [delegatedProtocols, setDelegatedProtocols] = useState<Set<string>>(
     new Set(),
   );
-  const [columnCount, setColumnCount] = useState(gridColumns);
-
-  useEffect(() => {
-    const update = () => setColumnCount(gridColumns());
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-
   const reload = useCallback(async (append = false) => {
     setError(null);
     if (append) setLoadingMore(true);
@@ -201,9 +199,9 @@ export function NodesPage() {
 
   const displayed = nodes;
 
-  // Flat render items: group headers interleave with nodes at the same fixed
-  // heights the virtualizer assumes (headers in the grid span the full row,
-  // padded with filler cells to keep the per-cell math exact).
+  // Flat render items: slim collapsible group headers interleave with
+  // nodes; each item carries its own height (headers are slimmer than
+  // rows) and the virtualizer runs in pixel space over prefix offsets.
   const groups = useMemo(
     () =>
       groupNodes(displayed, groupBy, locale, {
@@ -213,55 +211,141 @@ export function NodesPage() {
     [displayed, groupBy, locale, t],
   );
 
+  // Collapsed group keys (session-only — collapse is a browsing gesture).
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
+  function toggleGroup(key: string) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
   const listItems = useMemo(() => {
     const out: ListItem[] = [];
     if (groups.length === 0) {
-      for (const n of displayed) out.push({ type: "node", n });
+      for (const n of displayed) out.push({ type: "node", n, h: LIST_ROW_HEIGHT });
       return out;
     }
     for (const g of groups) {
+      const open = !collapsedGroups.has(g.key);
       out.push({
         type: "group",
+        key: g.key,
         label: g.label,
         flag: g.flag,
         count: g.nodes.length,
+        h: NODE_GROUP_H,
       });
-      for (const n of g.nodes) out.push({ type: "node", n });
+      if (open) {
+        for (const n of g.nodes)
+          out.push({ type: "node", n, h: LIST_ROW_HEIGHT });
+      }
     }
     return out;
-  }, [groups, displayed]);
+  }, [groups, displayed, collapsedGroups]);
 
   const gridItems = useMemo(() => {
     const out: GridItem[] = [];
     if (groups.length === 0) {
-      for (const n of displayed) out.push({ type: "node", n });
+      for (const n of displayed)
+        out.push({ type: "node", n, h: GRID_ROW_HEIGHT });
       return out;
     }
     for (const g of groups) {
+      const open = !collapsedGroups.has(g.key);
+      // Header pitch includes the row gap that follows the band.
       out.push({
         type: "group",
+        key: g.key,
         label: g.label,
         flag: g.flag,
         count: g.nodes.length,
+        h: NODE_GROUP_H + GRID_GAP,
       });
-      for (let i = 1; i < columnCount; i++) out.push({ type: "filler" });
-      for (const n of g.nodes) out.push({ type: "node", n });
+      if (open) {
+        for (const n of g.nodes)
+          out.push({ type: "node", n, h: GRID_ROW_HEIGHT });
+      }
     }
     return out;
-  }, [groups, columnCount, displayed]);
+  }, [groups, displayed, collapsedGroups]);
 
   const virtualized = displayed.length > VIRTUALIZE_AFTER;
-  const listRange = useVirtualRange({
-    itemCount: listItems.length,
-    itemSize: LIST_ROW_HEIGHT,
+
+  // Pixel-space virtualization: itemSize=1 turns the hook into a px window
+  // over the prefix-offset items (slim headers ≠ node rows, and collapse
+  // changes counts dynamically — both need per-item offsets).
+  function offsetsOf(items: { h: number }[]): number[] {
+    const o = new Array<number>(items.length + 1);
+    o[0] = 0;
+    for (let i = 0; i < items.length; i++) o[i + 1] = o[i] + items[i].h;
+    return o;
+  }
+  function visibleWindow<T extends { h: number }>(
+    items: T[],
+    offsets: number[],
+    startPx: number,
+    endPx: number,
+  ) {
+    let lo = 0;
+    let hi = items.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (offsets[mid + 1] <= startPx) lo = mid + 1;
+      else hi = mid;
+    }
+    const first = lo;
+    let last = first;
+    while (last < items.length && offsets[last] < endPx) last++;
+    const total = offsets[items.length] ?? 0;
+    const bottom = offsets[last] ?? total;
+    return {
+      first,
+      last,
+      top: offsets[first],
+      bottom,
+      bottomPad: Math.max(0, total - bottom),
+    };
+  }
+
+  const listOffsets = useMemo(() => offsetsOf(listItems), [listItems]);
+  const gridOffsets = useMemo(() => offsetsOf(gridItems), [gridItems]);
+  const listPx = useVirtualRange({
+    itemCount: Math.max(1, listOffsets[listOffsets.length - 1]),
+    itemSize: 1,
     enabled: virtualized,
+    overscanRows: 400,
   });
-  const gridRange = useVirtualRange({
-    itemCount: gridItems.length,
-    itemSize: GRID_ROW_HEIGHT,
-    itemsPerRow: columnCount,
+  const gridPx = useVirtualRange({
+    itemCount: Math.max(1, gridOffsets[gridOffsets.length - 1]),
+    itemSize: 1,
     enabled: virtualized,
+    overscanRows: 400,
   });
+  const listWin = useMemo(
+    () =>
+      visibleWindow(
+        listItems,
+        listOffsets,
+        Math.max(0, listPx.start),
+        Math.min(listPx.end, listOffsets[listOffsets.length - 1] ?? 0),
+      ),
+    [listItems, listOffsets, listPx],
+  );
+  const gridWin = useMemo(
+    () =>
+      visibleWindow(
+        gridItems,
+        gridOffsets,
+        Math.max(0, gridPx.start),
+        Math.min(gridPx.end, gridOffsets[gridOffsets.length - 1] ?? 0),
+      ),
+    [gridItems, gridOffsets, gridPx],
+  );
 
   async function onSelect(id: string) {
     if (busyId || switching) return;
@@ -404,30 +488,49 @@ export function NodesPage() {
     }
   }
 
-  /** Group header row (list): full-width cell at ROW_H for the virtualizer. */
-  function renderGroupRow(key: string, label: string, flag: string | undefined, count: number) {
+  /** Slim collapsible group header row (list). */
+  function renderGroupRow(item: Extract<ListItem, { type: "group" }>) {
+    const open = !collapsedGroups.has(item.key);
     return (
-      <tr key={key} className="node-group-row">
+      <tr
+        key={item.key}
+        className="node-group-row"
+        onClick={() => toggleGroup(item.key)}
+        title={t("nodes.groupToggleHint")}
+      >
         <td colSpan={6}>
-          <span className="node-group-label">
-            {flag ? <span className="node-group-flag">{flag}</span> : null}
-            {label}
+          <span className={`node-group-caret${open ? "" : " closed"}`}>
+            ▾
           </span>
-          <span className="node-group-count mono">{count}</span>
+          <span className="node-group-label">
+            {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
+            {item.label}
+          </span>
+          <span className="node-group-count mono">{item.count}</span>
         </td>
       </tr>
     );
   }
 
-  /** Group header band (grid): spans all columns at GRID_ROW_HEIGHT. */
-  function renderGroupHead(key: string, label: string, flag: string | undefined, count: number) {
+  /** Slim collapsible group header band (grid), spans all columns. */
+  function renderGroupHead(item: Extract<GridItem, { type: "group" }>) {
+    const open = !collapsedGroups.has(item.key);
     return (
-      <div key={key} className="node-group-head" style={{ height: GRID_ROW_HEIGHT }}>
-        <span className="node-group-label">
-          {flag ? <span className="node-group-flag">{flag}</span> : null}
-          {label}
+      <div
+        key={item.key}
+        className="node-group-head"
+        style={{ height: NODE_GROUP_H }}
+        onClick={() => toggleGroup(item.key)}
+        title={t("nodes.groupToggleHint")}
+      >
+        <span className={`node-group-caret${open ? "" : " closed"}`}>
+          ▾
         </span>
-        <span className="node-group-count mono">{count}</span>
+        <span className="node-group-label">
+          {item.flag ? <span className="node-group-flag">{item.flag}</span> : null}
+          {item.label}
+        </span>
+        <span className="node-group-count mono">{item.count}</span>
       </div>
     );
   }
@@ -673,29 +776,24 @@ export function NodesPage() {
                 <th style={{ width: 90 }}>{t("nodes.sortLatency")}</th>
               </tr>
             </thead>
-            <tbody ref={listRange.containerRef as React.RefObject<HTMLTableSectionElement>}>
-              {listRange.paddingTop > 0 && (
+            <tbody ref={listPx.containerRef as React.RefObject<HTMLTableSectionElement>}>
+              {listWin.top > 0 && (
                 <tr className="node-virtual-spacer" aria-hidden="true">
-                  <td colSpan={6} style={{ height: listRange.paddingTop }} />
+                  <td colSpan={6} style={{ height: listWin.top }} />
                 </tr>
               )}
               {listItems
-                .slice(listRange.start, listRange.end)
-                .map((item, i) =>
+                .slice(listWin.first, listWin.last)
+                .map((item) =>
                   item.type === "group" ? (
-                    renderGroupRow(
-                      `g-${listRange.start + i}`,
-                      item.label,
-                      item.flag,
-                      item.count,
-                    )
+                    renderGroupRow(item)
                   ) : (
                     renderNodeRow(item.n)
                   ),
                 )}
-              {listRange.paddingBottom > 0 && (
+              {listWin.bottom < (listOffsets[listOffsets.length - 1] ?? 0) && (
                 <tr className="node-virtual-spacer" aria-hidden="true">
-                  <td colSpan={6} style={{ height: listRange.paddingBottom }} />
+                  <td colSpan={6} style={{ height: listWin.bottomPad }} />
                 </tr>
               )}
             </tbody>
@@ -704,31 +802,24 @@ export function NodesPage() {
       ) : (
         <div
           className={virtualized ? "node-grid-window" : undefined}
-          ref={gridRange.containerRef as React.RefObject<HTMLDivElement>}
+          ref={gridPx.containerRef as React.RefObject<HTMLDivElement>}
         >
-          {gridRange.paddingTop > 0 && (
-            <div style={{ height: gridRange.paddingTop }} aria-hidden="true" />
+          {gridWin.top > 0 && (
+            <div style={{ height: gridWin.top }} aria-hidden="true" />
           )}
           <div
             className={`node-grid ${virtualized ? "node-grid-virtual" : ""}${clickTest ? " spot-armed" : ""}`}
           >
             {gridItems
-              .slice(gridRange.start, gridRange.end)
-              .map((item, i) => {
-                if (item.type === "group")
-                  return renderGroupHead(
-                    `g-${gridRange.start + i}`,
-                    item.label,
-                    item.flag,
-                    item.count,
-                  );
-                if (item.type === "filler")
-                  return <div key={`f-${gridRange.start + i}`} aria-hidden />;
-                return renderNodeCard(item.n);
-              })}
+              .slice(gridWin.first, gridWin.last)
+              .map((item) =>
+                item.type === "group"
+                  ? renderGroupHead(item)
+                  : renderNodeCard(item.n),
+              )}
           </div>
-          {gridRange.paddingBottom > 0 && (
-            <div style={{ height: gridRange.paddingBottom }} aria-hidden="true" />
+          {gridWin.bottom < (gridOffsets[gridOffsets.length - 1] ?? 0) && (
+            <div style={{ height: gridWin.bottomPad }} aria-hidden="true" />
           )}
         </div>
       )}

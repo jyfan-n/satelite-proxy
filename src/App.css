@@ -2113,11 +2113,25 @@ tr.row-active {
    math stays exact; the grid header spans all columns at card height and
    is padded with filler cells to keep the per-cell indexing aligned. */
 .node-group-row > td {
-  height: 49px;
+  height: 30px;
   padding: 0 0.75rem;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--muted) 7%, transparent);
   font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.node-group-caret {
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-size: 0.7em;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.node-group-caret.closed {
+  transform: rotate(-90deg);
 }
 
 .node-group-head {
@@ -2129,6 +2143,8 @@ tr.row-active {
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--muted) 7%, transparent);
   font-weight: 600;
+  cursor: pointer;
+  user-select: none;
 }
 
 .node-group-label {

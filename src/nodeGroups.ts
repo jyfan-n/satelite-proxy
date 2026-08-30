@@ -198,15 +198,19 @@ export function groupNodes(
   if (by === "sub") {
     const map = new Map<string, NodeGroup>();
     for (const n of nodes) {
-      const key = n.subscription_name ?? "";
+      const key = n.subscription_name ?? "__nosub";
       let g = map.get(key);
       if (!g) {
-        g = { key, label: key || labels.noSub, nodes: [] };
+        g = {
+          key,
+          label: key === "__nosub" ? labels.noSub : key,
+          nodes: [],
+        };
         map.set(key, g);
       }
       g.nodes.push(n);
     }
-    return sortGroups([...map.values()], labels);
+    return sortGroups([...map.values()]);
   }
 
   if (by === "proto") {
@@ -219,7 +223,7 @@ export function groupNodes(
       }
       g.nodes.push(n);
     }
-    return sortGroups([...map.values()], labels);
+    return sortGroups([...map.values()]);
   }
 
   // country
@@ -242,13 +246,13 @@ export function groupNodes(
     }
     g.nodes.push(n);
   }
-  return sortGroups([...map.values()], labels);
+  return sortGroups([...map.values()]);
 }
 
-function sortGroups(groups: NodeGroup[], labels: GroupLabels): NodeGroup[] {
+function sortGroups(groups: NodeGroup[]): NodeGroup[] {
   return groups.sort((a, b) => {
-    const ao = a.key === "__other" || a.label === labels.noSub ? 1 : 0;
-    const bo = b.key === "__other" || b.label === labels.noSub ? 1 : 0;
+    const ao = a.key === "__other" || a.key === "__nosub" ? 1 : 0;
+    const bo = b.key === "__other" || b.key === "__nosub" ? 1 : 0;
     if (ao !== bo) return ao - bo;
     return a.label.localeCompare(b.label, "zh-Hans-CN");
   });
