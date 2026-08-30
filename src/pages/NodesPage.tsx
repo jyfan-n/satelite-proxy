@@ -93,6 +93,10 @@ export function NodesPage() {
   const [sortMode, setSortMode] = useState<SortMode>(() => {
     return (localStorage.getItem("nodes.sortMode") as SortMode) || "default";
   });
+  // Click-test mode: node clicks probe latency instead of selecting.
+  const [clickTest, setClickTest] = useState<boolean>(
+    () => localStorage.getItem("nodes.clickTest") === "1",
+  );
 
   const [customRuntime, setCustomRuntime] = useState(false);
   // Session-only latency results for custom-mode nodes (not persisted backend-side).
@@ -158,6 +162,10 @@ export function NodesPage() {
   useEffect(() => {
     localStorage.setItem("nodes.sortMode", sortMode);
   }, [sortMode]);
+
+  useEffect(() => {
+    localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
+  }, [clickTest]);
 
   const displayed = nodes;
   const virtualized = displayed.length > VIRTUALIZE_AFTER;
@@ -272,6 +280,48 @@ export function NodesPage() {
   // stopped" — swap the cell note accordingly.
   const pingNote = testKind === "ping" ? t("nodes.pingUnsupported") : undefined;
 
+  // Click-test mode: probe one node with the real-latency path (Clash delay
+  // API through the core; TCP fallback when the core is stopped). The backend
+  // persists the result, same as the batch run.
+  async function onTestOne(id: string) {
+    if (testing || testingIds.size > 0 || busyId || switching) return;
+    setTestKind("real");
+    setError(null);
+    setTestingIds(new Set([id]));
+    setNodes((prev) =>
+      prev.map((n) =>
+        n.id === id ? { ...n, latency_ms: undefined, latency_at: undefined } : n,
+      ),
+    );
+    try {
+      const batch = await testNodesLatency([id], 3000);
+      const r = batch.results.find((x) => x.id === id);
+      setUnsupportedIds((prev) => {
+        const next = new Set(prev);
+        if (r?.method === "unsupported") next.add(id);
+        else next.delete(id);
+        return next;
+      });
+      if (r) {
+        setNodes((prev) =>
+          prev.map((n) =>
+            n.id === id
+              ? { ...n, latency_ms: r.latency_ms ?? null, latency_at: r.tested_at }
+              : n,
+          ),
+        );
+      }
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setTestingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
   return (
     <div className="page nodes-page">
       {customRuntime && (
@@ -338,6 +388,18 @@ export function NodesPage() {
               {testing && testKind === "ping" ? t("nodes.pinging") : t("nodes.pingTest")}
             </GlassButton>
           )}
+          {/* Click-test toggle: accent-tinted while enabled. Meaningless in
+              custom mode (rows are not clickable there) — hidden with ping. */}
+          {!customRuntime && (
+            <GlassButton
+              icon="👆"
+              variant={clickTest ? "primary" : "plain"}
+              onClick={() => setClickTest((v) => !v)}
+              title={t("nodes.clickTestHint")}
+            >
+              {t("nodes.clickTest")}
+            </GlassButton>
+          )}
 
           <GlassSeg
             value={viewMode}
@@ -398,8 +460,17 @@ export function NodesPage() {
                   <tr
                     key={n.id}
                     className={`node-virtual-row ${active ? "row-active" : ""}`}
-                    onClick={customRuntime ? undefined : () => void onSelect(n.id)}
+                    onClick={
+                      customRuntime
+                        ? undefined
+                        : clickTest
+                          ? () => void onTestOne(n.id)
+                          : () => void onSelect(n.id)
+                    }
                     style={{ cursor: customRuntime ? "default" : "pointer" }}
+                    title={
+                      !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
+                    }
                   >
                     <td>{active ? "●" : "○"}</td>
                     <td>
@@ -452,8 +523,11 @@ export function NodesPage() {
                   key={n.id}
                   type="button"
                   className={`node-card ${active ? "active" : ""}`}
-                  onClick={() => void onSelect(n.id)}
+                  onClick={() => void (clickTest ? onTestOne(n.id) : onSelect(n.id))}
                   disabled={customRuntime || busyId === n.id}
+                  title={
+                    !customRuntime && clickTest ? t("nodes.clickTestLatency") : undefined
+                  }
                 >
                   <div className="node-card-top">
                     <span className="node-dot">{active ? "●" : "○"}</span>
