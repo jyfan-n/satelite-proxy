@@ -17,7 +17,7 @@
 
 import type { ProxyNode } from "./types";
 
-export type GroupBy = "sub" | "proto" | "country";
+export type GroupBy = "none" | "sub" | "proto" | "country";
 
 export interface NodeGroup {
   /** Stable key (subscription id / protocol string / region id). */
@@ -193,6 +193,8 @@ export function groupNodes(
   locale: string,
   labels: GroupLabels,
 ): NodeGroup[] {
+  if (by === "none") return [];
+
   if (by === "sub") {
     const map = new Map<string, NodeGroup>();
     for (const n of nodes) {

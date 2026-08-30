@@ -1989,6 +1989,12 @@ tr.row-active {
   justify-content: flex-end;
 }
 
+/* Grouping seg + view seg always share one wrapped row (never split). */
+.nodes-view-segs {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .segmented.compact {
   display: inline-grid;
   grid-auto-flow: column;

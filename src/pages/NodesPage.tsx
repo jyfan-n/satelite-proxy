@@ -193,7 +193,7 @@ export function NodesPage() {
 
   // Grouping: subscription / protocol / country (persisted like viewMode).
   const [groupBy, setGroupBy] = useState<GroupBy>(
-    () => (localStorage.getItem("nodes.groupBy") as GroupBy) || "sub",
+    () => (localStorage.getItem("nodes.groupBy") as GroupBy) || "none",
   );
   useEffect(() => {
     localStorage.setItem("nodes.groupBy", groupBy);
@@ -215,6 +215,10 @@ export function NodesPage() {
 
   const listItems = useMemo(() => {
     const out: ListItem[] = [];
+    if (groups.length === 0) {
+      for (const n of displayed) out.push({ type: "node", n });
+      return out;
+    }
     for (const g of groups) {
       out.push({
         type: "group",
@@ -225,10 +229,14 @@ export function NodesPage() {
       for (const n of g.nodes) out.push({ type: "node", n });
     }
     return out;
-  }, [groups]);
+  }, [groups, displayed]);
 
   const gridItems = useMemo(() => {
     const out: GridItem[] = [];
+    if (groups.length === 0) {
+      for (const n of displayed) out.push({ type: "node", n });
+      return out;
+    }
     for (const g of groups) {
       out.push({
         type: "group",
@@ -240,7 +248,7 @@ export function NodesPage() {
       for (const n of g.nodes) out.push({ type: "node", n });
     }
     return out;
-  }, [groups, columnCount]);
+  }, [groups, columnCount, displayed]);
 
   const virtualized = displayed.length > VIRTUALIZE_AFTER;
   const listRange = useVirtualRange({
@@ -542,16 +550,6 @@ export function NodesPage() {
           </p>
         </div>
         <div className="header-actions nodes-toolbar">
-          <GlassSeg
-            value={groupBy}
-            ariaLabel={t("nodes.groupBy")}
-            onChange={(v) => setGroupBy(v as GroupBy)}
-            options={[
-              { value: "sub", label: t("nodes.groupSub") },
-              { value: "proto", label: t("nodes.groupProto") },
-              { value: "country", label: t("nodes.groupCountry") },
-            ]}
-          />
           <input
             autoCapitalize="off"
             autoCorrect="off"
@@ -615,15 +613,29 @@ export function NodesPage() {
             </GlassButton>
           )}
 
-          <GlassSeg
-            value={viewMode}
-            ariaLabel="视图"
-            onChange={(v) => setViewMode(v as ViewMode)}
-            options={[
-              { value: "list", label: "列表" },
-              { value: "grid", label: "网格" },
-            ]}
-          />
+          {/* Grouping + view segs glue together on one wrapped row. */}
+          <div className="nodes-view-segs">
+            <GlassSeg
+              value={groupBy}
+              ariaLabel={t("nodes.groupBy")}
+              onChange={(v) => setGroupBy(v as GroupBy)}
+              options={[
+                { value: "none", label: t("nodes.groupDefault") },
+                { value: "sub", label: t("nodes.groupSub") },
+                { value: "proto", label: t("nodes.groupProto") },
+                { value: "country", label: t("nodes.groupCountry") },
+              ]}
+            />
+            <GlassSeg
+              value={viewMode}
+              ariaLabel="视图"
+              onChange={(v) => setViewMode(v as ViewMode)}
+              options={[
+                { value: "list", label: "列表" },
+                { value: "grid", label: "网格" },
+              ]}
+            />
+          </div>
         </div>
       </header>
 
