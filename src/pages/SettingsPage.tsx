@@ -783,7 +783,9 @@ export function SettingsPage() {
                   ? t("settings.corePreparing")
                   : progress.stage === "installing"
                     ? t("settings.coreInstalling")
-                    : t("settings.coreDownloading")}
+                    : progress.stage === "assets"
+                      ? t("settings.coreAssets")
+                      : t("settings.coreDownloading")}
               </span>
               <span className="mono core-download-percent">
                 {progress.percent != null

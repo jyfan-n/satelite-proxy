@@ -241,11 +241,47 @@ pub async fn download_core(
     let kind = parse_kind(kind);
     let proxy_url = current_download_proxy(&state)?;
     let progress_app = app.clone();
-    download_latest_core_with_progress(kind, &state.app_data_dir, tag, proxy_url, move |progress| {
-        let _ = progress_app.emit(CORE_DOWNLOAD_EVENT, progress);
+    let result =
+        download_latest_core_with_progress(kind, &state.app_data_dir, tag, proxy_url.clone(), move |progress| {
+            let _ = progress_app.emit(CORE_DOWNLOAD_EVENT, progress);
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // The binary is installed — eagerly fetch its runtime assets (geodata,
+    // wintun) through the same download proxy, so the first start doesn't
+    // discover-and-download them while holding the store/runtime locks
+    // (AGENTS.md §9.22). Failures are warnings; startup ensure_* still run
+    // as the fallback.
+    let _ = app.emit(
+        CORE_DOWNLOAD_EVENT,
+        crate::core::CoreDownloadProgress {
+            kind: kind.as_str().into(),
+            stage: "assets",
+            downloaded: 0,
+            total: None,
+            percent: None,
+            via_proxy: proxy_url.is_some(),
+        },
+    );
+    let data_dir = state.app_data_dir.clone();
+    let resource_dir = app.path().resource_dir().ok();
+    let prefetch_proxy = proxy_url.clone();
+    let warnings = tauri::async_runtime::spawn_blocking(move || {
+        crate::core::prefetch_runtime_assets(
+            kind,
+            &data_dir,
+            resource_dir.as_deref(),
+            prefetch_proxy.as_deref(),
+        )
     })
     .await
-    .map_err(|e| e.to_string())
+    .unwrap_or_default();
+    for warning in &warnings {
+        crate::app_log::warn("core_assets", warning.clone());
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
