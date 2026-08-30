@@ -241,12 +241,17 @@ pub async fn download_core(
     let kind = parse_kind(kind);
     let proxy_url = current_download_proxy(&state)?;
     let progress_app = app.clone();
-    let result =
-        download_latest_core_with_progress(kind, &state.app_data_dir, tag, proxy_url.clone(), move |progress| {
+    let result = download_latest_core_with_progress(
+        kind,
+        &state.app_data_dir,
+        tag,
+        proxy_url.clone(),
+        move |progress| {
             let _ = progress_app.emit(CORE_DOWNLOAD_EVENT, progress);
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // The binary is installed — eagerly fetch its runtime assets (geodata,
     // wintun) through the same download proxy, so the first start doesn't
