@@ -371,8 +371,8 @@ const en = {
   "config.emptyHint":
     "Add a subscription, a manual node, parsed links, or a complete sing-box config",
   "config.nodes": "{n} nodes",
-  "config.autoUpdateBadge": "auto {n}m",
-  "config.autoUpdateHint": "Auto-update every {n} minutes",
+  "config.autoUpdateBadge": "auto {n}h",
+  "config.autoUpdateHint": "Auto-update every {n} h",
   "config.skipped": "skipped {n}",
   "config.url": "URL",
   "config.file": "File",
@@ -1242,8 +1242,8 @@ const zh: Record<MessageKey, string> = {
   "config.emptyHint":
     "添加订阅、手动填写、链接解析，或导入完整 sing-box 配置",
   "config.nodes": "{n} 节点",
-  "config.autoUpdateBadge": "自动 {n} 分",
-  "config.autoUpdateHint": "每 {n} 分钟自动更新一次",
+  "config.autoUpdateBadge": "自动 {n} 小时",
+  "config.autoUpdateHint": "每 {n} 小时自动更新一次",
   "config.skipped": "跳过 {n}",
   "config.url": "URL",
   "config.file": "文件",

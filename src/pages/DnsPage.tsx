@@ -396,7 +396,6 @@ export function DnsPage({ embedded = false }: { embedded?: boolean }) {
                 </GlassButton>
               </div>
               <GlassButton
-                variant="primary"
                 icon="⌕"
                 disabled={diagBusy || diagAll.length === 0}
                 onClick={() => void onDiagnose()}

@@ -273,7 +273,6 @@ export function LogsPage() {
             {t("common.refresh")}
           </GlassButton>
           <GlassButton
-            variant="danger"
             icon="⌫"
             onClick={() => void onClear()}
             title={t("common.clear")}

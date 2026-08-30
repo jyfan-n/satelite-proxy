@@ -759,7 +759,6 @@ export function SettingsPage() {
               : t("settings.coreCheck")}
           </GlassButton>
           <GlassButton
-            variant="primary"
             icon="⤓"
             disabled={busy || checking}
             onClick={() => void onDownloadCore(kind)}
@@ -1766,7 +1765,6 @@ export function SettingsPage() {
                 {/* The app has no in-app downloader — "re-download" simply
                    opens the latest GitHub release page in the browser. */}
                 <GlassButton
-                  variant="primary"
                   icon="⤓"
                   onClick={() => void openUrl(RELEASES_URL)}
                 >

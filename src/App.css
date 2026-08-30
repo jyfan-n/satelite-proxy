@@ -2321,7 +2321,7 @@ button.node-card:disabled,
 
 .node-card-name {
   font-weight: 600;
-  font-size: 0.85rem;
+  font-size: 0.8rem; /* 12.8px */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3462,7 +3462,9 @@ button.small {
 /* config — compact FlClash-like subscription cards */
 .sub-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 210px min → exactly 4 columns in the fixed 960px pro window (content
+     ≈912px after .main gutters); 240px only fit 3. */
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 0.65rem;
   align-items: stretch;
 }
@@ -3559,9 +3561,11 @@ button.mix-on {
   color: var(--warn);
 }
 
-.sub-card-foot {
+/* Relative "updated x hours ago" in the card's title row, before the ⋮ menu */
+.sub-card-updated {
   font-size: 0.7rem;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 /* FlClash SubscriptionInfoView: bar then "used / total · expire" */
@@ -3602,17 +3606,37 @@ button.mix-on {
 
 .traffic-line {
   display: flex;
-  flex-wrap: wrap;
+  /* Single line, never wraps: used/total stays intact, the expire label
+     shrinks into an ellipsis when the card is too narrow. */
+  flex-wrap: nowrap;
   align-items: baseline;
   gap: 0.2rem 0.35rem;
   font-size: 0.72rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The traffic figures keep their full width; only the tail label squeezes. */
+.traffic-line > span:first-child {
+  flex-shrink: 0;
 }
 
 .traffic-line .dot-sep {
   opacity: 0.55;
+  flex-shrink: 0;
+}
+
+/* Expire / remaining-time label: fills whatever line space is left and
+   ellipsizes when too long; full text stays in the tooltip. */
+.traffic-line .traffic-expire {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .sub-card-top-right {
