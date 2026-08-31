@@ -139,15 +139,21 @@ function latencyClass(ms?: number | null) {
   return "lat-slow";
 }
 
+/** Country code overrides, kept in sync with nodeGroups.ts REGIONS table. */
+const COUNTRY_NAME_OVERRIDES_ZH: Record<string, string> = {
+  HK: "中国香港",
+  TW: "中国台湾",
+};
+
 /** Country code → localized region name (zh: "US" → "美国") via CLDR.
  *  Falls back to the raw code on invalid codes / engines without the API. */
 function countryDisplayName(cc: string, locale: string): string {
+  const code = cc.toUpperCase();
+  if (locale !== "en" && COUNTRY_NAME_OVERRIDES_ZH[code]) {
+    return COUNTRY_NAME_OVERRIDES_ZH[code];
+  }
   try {
-    return (
-      new Intl.DisplayNames([locale], { type: "region" }).of(
-        cc.toUpperCase(),
-      ) || cc
-    );
+    return new Intl.DisplayNames([locale], { type: "region" }).of(code) || cc;
   } catch {
     return cc;
   }

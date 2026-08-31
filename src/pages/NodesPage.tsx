@@ -3,9 +3,9 @@ import {
   generateSingboxConfig,
   getProxyStatus,
   getSettings,
+  listAllNodes,
   listCustomConfigNodes,
   listNodeIds,
-  listNodesPage,
   pingNodesLatency,
   setCurrentNode,
   testCustomNodesLatency,
@@ -25,7 +25,6 @@ import type { AutoSelectMode, ProxyNode, SortMode, ViewMode } from "../types";
 const VIRTUALIZE_AFTER = 200;
 const LIST_ROW_HEIGHT = 49;
 const GRID_ROW_HEIGHT = 94;
-const PAGE_SIZE = 200;
 
 /** Slim group header band height (px). */
 const NODE_GROUP_H = 30;
@@ -97,7 +96,6 @@ export function NodesPage() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -140,9 +138,21 @@ export function NodesPage() {
     () => () => latencyBufferRef.current?.stop(),
     [],
   );
-  const reload = useCallback(async (append = false) => {
+
+  // Grouping: default (flat) / subscription / protocol / country, persisted
+  // like viewMode. v2 key: the first iteration persisted "sub" as its
+  // default — the feature is unreleased, so bump the key to let every
+  // profile start on the new "default = flat" preference.
+  const [groupBy, setGroupBy] = useState<GroupBy>(
+    () =>
+      (localStorage.getItem("nodes.groupBy.v2") as GroupBy | null) || "none",
+  );
+  useEffect(() => {
+    localStorage.setItem("nodes.groupBy.v2", groupBy);
+  }, [groupBy]);
+
+  const reload = useCallback(async () => {
     setError(null);
-    if (append) setLoadingMore(true);
     try {
       const settings = await getSettings();
       const custom = (settings.runtime_source ?? "generated").startsWith("singbox:");
@@ -158,32 +168,26 @@ export function NodesPage() {
             )
           : new Set(),
       );
-      const offset = append ? nodes.length : 0;
-      if (custom) {
-        // Custom mode: read-only nodes extracted from the sing-box config,
-        // overlaid with this session's latency results.
-        const all = applyCustomLatency(await listCustomConfigNodes(), customLatency);
-        const filtered = filterCustomNodes(all, query, sortMode, offset, PAGE_SIZE);
-        setNodes((prev) => (append ? [...prev, ...filtered.nodes] : filtered.nodes));
-        setTotal(filtered.total);
-      } else {
-        const page = await listNodesPage(query, sortMode, offset, PAGE_SIZE);
-        setNodes((prev) => (append ? [...prev, ...page.nodes] : page.nodes));
-        setTotal(page.total);
-      }
+      // Always load the full node set — grouping needs to see everything to
+      // classify correctly, and pagination made "load more" ambiguous once
+      // grouped (unclear which group new items would land in).
+      const all = custom
+        ? applyCustomLatency(await listCustomConfigNodes(), customLatency)
+        : await listAllNodes();
+      const filtered = filterCustomNodes(all, query, sortMode, 0, Number.MAX_SAFE_INTEGER);
+      setNodes(filtered.nodes);
+      setTotal(filtered.total);
     } catch (e) {
       setError(typeof e === "string" ? e : String(e));
     } finally {
       setLoading(false);
-      setLoadingMore(false);
     }
-  }, [nodes.length, query, sortMode, customLatency]);
+  }, [query, sortMode, customLatency]);
 
   useEffect(() => {
     setLoading(true);
-    const timer = window.setTimeout(() => void reload(false), 150);
+    const timer = window.setTimeout(() => void reload(), 150);
     return () => window.clearTimeout(timer);
-    // nodes.length changes as pages append and must not restart the first page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, sortMode]);
 
@@ -198,18 +202,6 @@ export function NodesPage() {
   useEffect(() => {
     localStorage.setItem("nodes.clickTest", clickTest ? "1" : "0");
   }, [clickTest]);
-
-  // Grouping: default (flat) / subscription / protocol / country, persisted
-  // like viewMode. v2 key: the first iteration persisted "sub" as its
-  // default — the feature is unreleased, so bump the key to let every
-  // profile start on the new "default = flat" preference.
-  const [groupBy, setGroupBy] = useState<GroupBy>(
-    () =>
-      (localStorage.getItem("nodes.groupBy.v2") as GroupBy | null) || "none",
-  );
-  useEffect(() => {
-    localStorage.setItem("nodes.groupBy.v2", groupBy);
-  }, [groupBy]);
 
   const displayed = nodes;
 
@@ -226,9 +218,23 @@ export function NodesPage() {
   );
 
   // Collapsed group keys (session-only — collapse is a browsing gesture).
+  // Starts every group collapsed when grouping is (re)enabled or the
+  // dimension changes; subsequent data reloads under the same dimension
+  // don't reset groups the user has already opened.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
     () => new Set(),
   );
+  const collapsedForGroupByRef = useRef<GroupBy | null>(null);
+  useEffect(() => {
+    if (groupBy === "none") {
+      collapsedForGroupByRef.current = null;
+      return;
+    }
+    if (collapsedForGroupByRef.current === groupBy) return;
+    if (groups.length === 0) return; // wait for data before collapsing
+    collapsedForGroupByRef.current = groupBy;
+    setCollapsedGroups(new Set(groups.map((g) => g.key)));
+  }, [groupBy, groups]);
   function toggleGroup(key: string) {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -473,7 +479,7 @@ export function NodesPage() {
       setTestingIds(new Set());
       // Custom results are session-only — keep the merged values instead of
       // re-reading the latency-less extracted list.
-      if (!customRuntime) await reload(false);
+      if (!customRuntime) await reload();
     }
   }
 
@@ -856,13 +862,6 @@ export function NodesPage() {
           {gridWin.bottom < (gridOffsets[gridOffsets.length - 1] ?? 0) && (
             <div style={{ height: gridWin.bottomPad }} aria-hidden="true" />
           )}
-        </div>
-      )}
-      {!loading && nodes.length < total && (
-        <div style={{ display: "flex", justifyContent: "center", padding: 12 }}>
-          <GlassButton disabled={loadingMore} onClick={() => void reload(true)}>
-            {loadingMore ? t("common.loading") : `加载更多（${nodes.length}/${total}）`}
-          </GlassButton>
         </div>
       )}
     </div>
