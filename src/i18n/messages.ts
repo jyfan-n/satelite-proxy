@@ -53,6 +53,8 @@ const en = {
   "simple.sparkApps": "Apps",
   "simple.sparkNodes": "Nodes",
   "simple.sparkDirect": "Direct",
+  "simple.sparkExpand": "Fullscreen",
+  "simple.sparkShrink": "Exit fullscreen",
 
   // dashboard
   "dashboard.title": "Overview",
@@ -939,6 +941,8 @@ const zh: Record<MessageKey, string> = {
   "simple.sparkApps": "程序",
   "simple.sparkNodes": "节点",
   "simple.sparkDirect": "直连",
+  "simple.sparkExpand": "全屏",
+  "simple.sparkShrink": "退出全屏",
 
   "dashboard.title": "概览",
   "dashboard.desc": "启动代理后通过所选节点转发流量",
