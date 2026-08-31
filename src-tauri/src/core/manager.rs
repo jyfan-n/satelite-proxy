@@ -107,7 +107,7 @@ impl CoreManager {
         self.log_path.as_deref()
     }
 
-    fn latest_log_path(&self) -> Option<PathBuf> {
+    pub fn latest_log_path(&self) -> Option<PathBuf> {
         self.log_dir
             .as_ref()
             .map(|dir| crate::log_retention::hourly_path(dir, self.kind.log_prefix()))
@@ -120,6 +120,21 @@ impl CoreManager {
     pub fn core_log_tail(&self, limit: usize) -> Option<(PathBuf, Vec<String>)> {
         let path = self.latest_log_path()?;
         Some((path.clone(), read_file_tail_lines(&path, limit)))
+    }
+
+    /// Truncate the current-hour log file of this core's session. The core
+    /// process keeps its writer handle open in append mode, so after the
+    /// truncate its next write lands at the start of the (now empty) file —
+    /// a clean "clear" without touching previous hours' rotated files.
+    pub fn clear_log(&self) -> AppResult<()> {
+        let Some(path) = self.latest_log_path() else {
+            return Ok(());
+        };
+        if path.exists() {
+            fs::write(&path, b"")
+                .map_err(|e| AppError::Core(format!("clear core log {}: {e}", path.display())))?;
+        }
+        Ok(())
     }
 
     pub fn is_running(&self) -> bool {
@@ -167,7 +182,7 @@ impl CoreManager {
                             self.kind.display_name()
                         ),
                     );
-                    self.last_error = Some(map_tun_permission_hint(&strip_ansi(&detail)));
+                    self.last_error = Some(map_core_startup_hint(&strip_ansi(&detail)));
                 }
             }
             return;
@@ -197,7 +212,7 @@ impl CoreManager {
                             .unwrap_or_else(|| {
                                 format!("{} exited: {status}", self.kind.display_name())
                             });
-                        self.last_error = Some(map_tun_permission_hint(&strip_ansi(&detail)));
+                        self.last_error = Some(map_core_startup_hint(&strip_ansi(&detail)));
                     }
                 }
                 Ok(None) => {}
@@ -450,7 +465,7 @@ impl CoreManager {
         if elevated {
             if let Err(e) = super::macos_auth::ensure_core_setuid(binary) {
                 self.state = CoreState::Error;
-                let msg = map_tun_permission_hint(&e.to_string());
+                let msg = map_core_startup_hint(&e.to_string());
                 self.last_error = Some(msg.clone());
                 return Err(AppError::Core(msg));
             }
@@ -494,11 +509,7 @@ impl CoreManager {
         let log_path = crate::log_retention::hourly_path(log_dir, kind.log_prefix());
         crate::log_retention::cleanup_current_hour(log_dir)
             .map_err(|e| AppError::Core(format!("clean logs: {e}")))?;
-        let _ = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| AppError::Core(format!("open log: {e}")))?;
+        let _ = open_hourly_log(&log_path).map_err(|e| AppError::Core(format!("open log: {e}")))?;
 
         self.state = CoreState::Starting;
         self.last_error = None;
@@ -660,7 +671,7 @@ impl CoreManager {
         );
         self.state = CoreState::Error;
         self.run_mode = RunMode::None;
-        AppError::Core(map_tun_permission_hint(&err))
+        AppError::Core(map_core_startup_hint(&err))
     }
 
     fn wait_until_ready(&mut self, mixed_port: u16) -> AppResult<()> {
@@ -959,6 +970,34 @@ fn is_stale_cache_db_error(err: &str) -> bool {
     lower.contains("cache.db") && lower.contains("permission denied")
 }
 
+/// Appends actionable guidance for known core-startup / core-death failure
+/// classes. All error-surface call sites should go through this wrapper so
+/// every failure class gets exactly one hint. Currently: a locked `cache.db`
+/// (see below) and TUN permission failures (see [`map_tun_permission_hint`]).
+pub(crate) fn map_core_startup_hint(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if (lower.contains("cache-file") || lower.contains("cache_file")) && lower.contains("timeout") {
+        // `initialize cache-file: timeout` is the signature of an orphaned
+        // elevated core from a previous session: the helper/sing-box pair
+        // outlives a crashed session (nothing binds the helper to the app,
+        // and the unprivileged app cannot terminate a higher-integrity
+        // process), so the bolt file lock stays held until the user or a
+        // reboot clears it. Say so — the raw FATAL line alone reads like a
+        // config bug.
+        format!(
+            "{err}\n\n{}",
+            "sing-box 的 cache.db 被其他进程占用（初始化超时）。通常是上次会话异常退出后残留的管理员权限 sing-box 仍在运行，普通权限无法结束它。\n\
+             处理：以管理员身份运行任务管理器结束 sing-box.exe，或重启电脑后重试；残留进程还持有 TUN 虚拟网卡，放着不管可能导致无法上网。"
+        )
+    } else {
+        map_tun_permission_hint(err)
+    }
+}
+
+/// Appends the platform TUN-permission guidance when `err` matches a
+/// permission-denied failure. Also applied by the runtime's readiness
+/// windows: their embedded log tail is exactly where a FATAL "Access is
+/// denied" TUN line surfaces when a death slips past `wait_until_ready`.
 fn map_tun_permission_hint(err: &str) -> String {
     let lower = err.to_ascii_lowercase();
     if lower.contains("operation not permitted")
@@ -975,7 +1014,7 @@ fn map_tun_permission_hint(err: &str) -> String {
              请在 UAC 弹窗中点「是」；若点了「否」，请关闭 TUN 开关后重试，或以管理员身份运行本程序。"
         } else {
             "TUN 需要更高权限才能创建虚拟网卡 (utun)。\n\
-             macOS：首次开启 TUN 会为 sing-box 设置 setuid（一次 Touch ID / 密码），之后启停不再弹密码。\n\
+             macOS：首次开启 TUN 会为当前内核设置 setuid（一次指纹/密码授权），之后启停不再弹窗。\n\
              若刚更新过内核，可能需重新授权一次。"
         };
         format!("{err}\n\n{platform_hint}")
@@ -1197,6 +1236,31 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(buf.trim().to_string())
 }
 
+/// Open (create if missing) an hourly core log file for append. A setuid-TUN
+/// session can leave that hourly file owned by root without a user write bit,
+/// so a same-hour relaunch fails here with EACCES and takes the whole core
+/// launch down ("open log: Permission denied"). The file is a disposable
+/// console tail, not user data — and the parent dir is writable — so on
+/// PermissionDenied we just unlink it and retry.
+fn open_hourly_log(path: &Path) -> std::io::Result<File> {
+    let try_open = || OpenOptions::new().create(true).append(true).open(path);
+    match try_open() {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            crate::app_log::warn(
+                "core",
+                format!(
+                    "log file not writable (stale root-owned?), recreating: {}",
+                    path.display()
+                ),
+            );
+            fs::remove_file(path)?;
+            try_open()
+        }
+        Err(e) => Err(e),
+    }
+}
+
 struct RotatingCoreWriter {
     log_dir: PathBuf,
     log_prefix: &'static str,
@@ -1222,7 +1286,7 @@ impl RotatingCoreWriter {
         let hour = crate::log_retention::current_hour();
         if self.file_hour != Some(hour) || self.file.is_none() {
             let path = crate::log_retention::hourly_path_for(&self.log_dir, self.log_prefix, hour);
-            match OpenOptions::new().create(true).append(true).open(&path) {
+            match open_hourly_log(&path) {
                 Ok(opened) => {
                     self.file_bytes = opened.metadata().map(|m| m.len()).unwrap_or(0);
                     self.bytes_since_cleanup = 0;
@@ -1408,6 +1472,49 @@ mod stale_cache_db_tests {
         // (delete — it's rebuildable cache, not user data).
         let err = "open active.json: permission denied";
         assert!(!is_stale_cache_db_error(err));
+    }
+}
+
+#[cfg(test)]
+mod core_startup_hint_tests {
+    //! `map_core_startup_hint` routes each known failure class to its one
+    //! actionable hint: the locked-cache.db timeout (orphaned elevated core
+    //! from a crashed session) gets the cache hint, TUN permission failures
+    //! the UAC/setuid hint, and unknown errors pass through untouched.
+    use super::map_core_startup_hint;
+
+    #[test]
+    fn cache_file_timeout_gets_the_orphan_hint() {
+        // The exact FATAL from the field incident: an orphaned elevated
+        // sing-box (helper survived the crashed session; the app cannot
+        // terminate a higher-integrity process) holds cache.db's file lock.
+        let err = "FATAL[0010] start service: initialize cache-file: timeout";
+        let mapped = map_core_startup_hint(err);
+        assert!(mapped.contains("cache.db 被其他进程占用"));
+        assert!(mapped.contains("管理员身份"));
+        assert!(mapped.starts_with(err), "original FATAL text is preserved");
+    }
+
+    #[test]
+    fn cache_file_word_without_timeout_is_not_the_lock_case() {
+        // `is_stale_cache_db_error` owns the permission-denied variant; the
+        // hint here must not fire on unrelated cache-file wording.
+        let err = "FATAL start service: initialize cache-file: bad path";
+        assert_eq!(map_core_startup_hint(err), err);
+    }
+
+    #[test]
+    fn tun_permission_failures_still_get_the_tun_hint() {
+        let err = "FATAL start inbound/tun[tun-in]: configure tun interface: Access is denied.";
+        let mapped = map_core_startup_hint(err);
+        assert!(mapped.contains("TUN"));
+        assert!(!mapped.contains("cache.db 被其他进程占用"));
+    }
+
+    #[test]
+    fn unknown_errors_pass_through_untouched() {
+        let err = "FATAL something entirely unknown happened";
+        assert_eq!(map_core_startup_hint(err), err);
     }
 }
 

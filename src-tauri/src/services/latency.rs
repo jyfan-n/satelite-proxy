@@ -8,8 +8,10 @@
 //!   mapping into the running config (custom sing-box profiles). UDP-only
 //!   protocols (hysteria/hysteria2/tuic) have no TCP fallback at all —
 //!   without the core they report an explicit "start the proxy" error.
-//! - **Smart switch**: passes the clash API when the core is up, so its
-//!   candidate scoring rides the same through-kernel probes.
+//! - **Smart switch**: ranks candidates with [`probe_nodes_ranked`] — TCP
+//!   ping for TCP-capable nodes (a better speed correlate in practice), the
+//!   through-kernel URL probe only for QUIC-only protocols and for the
+//!   current node's health confirmation.
 //!
 //! Clash path uses **unified delay** (like mihomo / FlClash): probe twice and
 //! report the second RTT so handshake / cold-connect bias is reduced.
@@ -30,7 +32,10 @@ use tokio::time::timeout;
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_CONCURRENCY: usize = 30;
 const GLOBAL_CONCURRENCY: usize = 30;
-const CACHE_TTL: Duration = Duration::from_secs(90);
+/// Shared probe-result TTL (successes; failures use [`FAILURE_CACHE_TTL`]).
+/// This is also what smart_switch's background ranking/health probes read —
+/// kept short (30s) so a "cached" number never lingers long.
+const CACHE_TTL: Duration = Duration::from_secs(30);
 const FAILURE_CACHE_TTL: Duration = Duration::from_secs(15);
 const MAX_CACHE_ENTRIES: usize = 4096;
 const CACHE_TRIM_TO: usize = 3072;
@@ -70,6 +75,28 @@ pub async fn probe_nodes(
     clash: Option<ClashApi>,
     probe_url: String,
 ) -> AppResult<Vec<LatencyResult>> {
+    probe_nodes_streaming(nodes, timeout_ms, concurrency, clash, probe_url, |_| {}, true)
+        .await
+}
+
+/// Same as [`probe_nodes`], but invokes `on_result` the moment each probe
+/// completes (completion order, which trails the input order since tasks
+/// launch front-to-back) so the UI can render results one node at a time
+/// instead of waiting for the whole batch. The returned Vec is still
+/// re-sorted into the caller's input order.
+///
+/// `use_cache = false` (user-triggered runs) skips reading cached results —
+/// every node is really probed — while the fresh result is still written
+/// back for background consumers (smart_switch).
+pub async fn probe_nodes_streaming(
+    nodes: &[ProxyNode],
+    timeout_ms: Option<u64>,
+    concurrency: Option<usize>,
+    clash: Option<ClashApi>,
+    probe_url: String,
+    on_result: impl Fn(&LatencyResult) + Send,
+    use_cache: bool,
+) -> AppResult<Vec<LatencyResult>> {
     let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     let concurrency = concurrency.unwrap_or(DEFAULT_CONCURRENCY).max(1);
     let mut pending = nodes.iter().cloned().enumerate();
@@ -83,6 +110,7 @@ pub async fn probe_nodes(
                 timeout_ms,
                 clash.clone(),
                 probe_url.clone(),
+                use_cache,
             );
         }
     }
@@ -91,7 +119,10 @@ pub async fn probe_nodes(
     let mut task_errors = Vec::new();
     while let Some(joined) = tasks.join_next().await {
         match joined {
-            Ok(result) => indexed_results.push(result),
+            Ok((index, result)) => {
+                on_result(&result);
+                indexed_results.push((index, result));
+            }
             Err(e) => task_errors.push(LatencyResult {
                 id: String::new(),
                 name: String::new(),
@@ -109,6 +140,7 @@ pub async fn probe_nodes(
                 timeout_ms,
                 clash.clone(),
                 probe_url.clone(),
+                use_cache,
             );
         }
     }
@@ -121,6 +153,114 @@ pub async fn probe_nodes(
     Ok(results)
 }
 
+/// Pure-TCP fast ping for the Nodes page "Ping 测试" button: direct TCP
+/// reachability, never routed through the kernel even when the core is
+/// running — that's the point (the through-kernel path is accurate but
+/// slow). Reuses the probe pool (caller-set concurrency, per-key coalescing
+/// and the shared `tcp|` cache). QUIC-only protocols have no TCP port to
+/// ping at all, so their `unsupported` note is rewritten from the
+/// "core not running" wording into a ping-appropriate one.
+pub async fn ping_nodes(
+    nodes: &[ProxyNode],
+    timeout_ms: Option<u64>,
+    concurrency: Option<usize>,
+) -> AppResult<Vec<LatencyResult>> {
+    ping_nodes_streaming(nodes, timeout_ms, concurrency, |_| {}, true).await
+}
+
+/// [`ping_nodes`] with per-node completion callbacks — see
+/// [`probe_nodes_streaming`] (also for the `use_cache` semantics).
+pub async fn ping_nodes_streaming(
+    nodes: &[ProxyNode],
+    timeout_ms: Option<u64>,
+    concurrency: Option<usize>,
+    on_result: impl Fn(&LatencyResult) + Send,
+    use_cache: bool,
+) -> AppResult<Vec<LatencyResult>> {
+    let mut results = probe_nodes_streaming(
+        nodes,
+        timeout_ms,
+        concurrency,
+        None,
+        String::new(),
+        on_result,
+        use_cache,
+    )
+    .await?;
+    for r in &mut results {
+        if r.method == "unsupported" {
+            r.error =
+                Some("QUIC-only protocol: no TCP port to ping — use the real-latency test with the core running".into());
+        }
+    }
+    Ok(results)
+}
+
+/// Ranking probe for smart switch: TCP ping for every TCP-capable node —
+/// empirically a better speed correlate than through-kernel URL probes,
+/// whose numbers are dominated by probe-server and TLS variance — and the
+/// kernel URL probe only for QUIC-only protocols, which have no TCP port
+/// to ping. Keeps candidate ranking and the current-node comparison
+/// like-for-like (see smart_switch). `clash` serves the QUIC fallback;
+/// without it those nodes come back `unsupported`. Results keep the
+/// caller's node order.
+pub async fn probe_nodes_ranked(
+    nodes: &[ProxyNode],
+    timeout_ms: u64,
+    concurrency: usize,
+    clash: Option<ClashApi>,
+    probe_url: &str,
+) -> AppResult<Vec<LatencyResult>> {
+    if nodes.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut tcp_nodes = Vec::new();
+    let mut udp_nodes = Vec::new();
+    for node in nodes {
+        if node.protocol.is_udp_only() {
+            udp_nodes.push(node.clone());
+        } else {
+            tcp_nodes.push(node.clone());
+        }
+    }
+    let tcp_results = if tcp_nodes.is_empty() {
+        Vec::new()
+    } else {
+        ping_nodes(&tcp_nodes, Some(timeout_ms), Some(concurrency)).await?
+    };
+    let udp_results = if udp_nodes.is_empty() {
+        Vec::new()
+    } else {
+        probe_nodes(
+            &udp_nodes,
+            Some(timeout_ms),
+            Some(concurrency),
+            clash,
+            probe_url.to_string(),
+        )
+        .await?
+    };
+    // Merge back into the caller's order so index-based consumers are stable.
+    let by_id: HashMap<String, LatencyResult> = tcp_results
+        .into_iter()
+        .chain(udp_results)
+        .map(|r| (r.id.clone(), r))
+        .collect();
+    Ok(nodes
+        .iter()
+        .map(|n| {
+            by_id.get(&n.id).cloned().unwrap_or(LatencyResult {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                latency_ms: None,
+                error: Some("missing probe result".into()),
+                tested_at: now_secs(),
+                method: "error".into(),
+            })
+        })
+        .collect())
+}
+
 fn spawn_probe_task(
     tasks: &mut tokio::task::JoinSet<(usize, LatencyResult)>,
     index: usize,
@@ -128,6 +268,7 @@ fn spawn_probe_task(
     timeout_ms: u64,
     clash: Option<ClashApi>,
     probe_url: String,
+    use_cache: bool,
 ) {
     tasks.spawn(async move {
         let id = node.id.clone();
@@ -167,7 +308,7 @@ fn spawn_probe_task(
         } else {
             format!("tcp|{id}|{server}|{port}|{timeout_ms}")
         };
-        let result = probe_coalesced(key, move || async move {
+        let result = probe_coalesced(key, use_cache, move || async move {
             if use_clash {
                 probe_clash(
                     clash.expect("checked by use_clash"),
@@ -187,13 +328,19 @@ fn spawn_probe_task(
     });
 }
 
-async fn probe_coalesced<F, Fut>(key: String, probe: F) -> LatencyResult
+/// Shared probe entry: in-flight coalescing (per-key lock) + result cache.
+/// `use_cache = false` skips both cache reads — the caller always wants a
+/// real measurement — but the fresh result is still written back so
+/// background consumers (smart_switch) can reuse it.
+async fn probe_coalesced<F, Fut>(key: String, use_cache: bool, probe: F) -> LatencyResult
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = LatencyResult>,
 {
-    if let Some(result) = cached_result(&key) {
-        return result;
+    if use_cache {
+        if let Some(result) = cached_result(&key) {
+            return result;
+        }
     }
 
     let probe_lock = {
@@ -204,8 +351,13 @@ where
         )
     };
     let _key_guard = probe_lock.lock().await;
-    if let Some(result) = cached_result(&key) {
-        return result;
+    // Double-check behind the lock — but only when reading cache is allowed
+    // at all; a bypass run must really probe even if another caller just
+    // finished one.
+    if use_cache {
+        if let Some(result) = cached_result(&key) {
+            return result;
+        }
     }
 
     let _global_permit = Arc::clone(&GLOBAL_SEMAPHORE)
@@ -495,6 +647,38 @@ mod tests {
         assert!(results[0].error.is_some());
     }
 
+    // The ping button must not tell users to "start the core" — it never
+    // uses the core at all. QUIC-only protocols are simply unpingable.
+    #[tokio::test]
+    async fn ping_nodes_flags_quic_only_without_core_not_running_note() {
+        use crate::domain::Protocol;
+        let nodes = vec![node(Protocol::Hysteria2)];
+        let results = ping_nodes(&nodes, Some(200), Some(1)).await.unwrap();
+        assert_eq!(results[0].method, "unsupported");
+        let err = results[0].error.as_deref().unwrap_or_default();
+        assert!(
+            !err.contains("core not running"),
+            "ping note must not claim the core is stopped: {err}"
+        );
+    }
+
+    // Smart-switch ranking: TCP-capable nodes ride the fast TCP ping even
+    // when the clash API is available; QUIC-only nodes fall back to the
+    // through-kernel URL probe. Order follows the input.
+    #[tokio::test]
+    async fn ranked_probes_use_tcp_for_tcp_capable_and_clash_for_quic() {
+        use crate::domain::Protocol;
+        let clash = crate::api::ClashApi::new("127.0.0.1", 1, "secret");
+        let nodes = vec![node(Protocol::Shadowsocks), node(Protocol::Hysteria2)];
+        let results = probe_nodes_ranked(&nodes, 200, 2, Some(clash), "")
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, nodes[0].id, "caller order must be kept");
+        assert_eq!(results[0].method, "tcp");
+        assert_eq!(results[1].method, "clash_api");
+    }
+
     #[tokio::test]
     async fn identical_in_flight_probes_are_coalesced_and_cached() {
         let key = unique_key("coalesce");
@@ -504,11 +688,15 @@ mod tests {
             let key = key.clone();
             let calls = Arc::clone(&calls);
             tasks.push(tokio::spawn(async move {
-                probe_coalesced(key, || async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    result(Some(42))
-                })
+                probe_coalesced(
+                    key,
+                    true,
+                    || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        result(Some(42))
+                    },
+                )
                 .await
             }));
         }
@@ -517,11 +705,65 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let cached = probe_coalesced(key, || async {
-            panic!("fresh successful result must be reused");
-        })
+        let cached = probe_coalesced(
+            key,
+            true,
+            || async {
+                panic!("fresh successful result must be reused");
+            },
+        )
         .await;
         assert_eq!(cached.latency_ms, Some(42));
+    }
+
+    // Manual runs bypass cache reads but still refresh it: a bypass probe
+    // must re-run even when a fresh cached result exists, and the new value
+    // must replace the cached one for later cache-reading callers
+    // (smart_switch).
+    #[tokio::test]
+    async fn cache_bypass_reruns_probe_and_refreshes_cache() {
+        let key = unique_key("bypass");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Prime the cache with Some(1).
+        let c = Arc::clone(&calls);
+        let primed = probe_coalesced(
+            key.clone(),
+            true,
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                result(Some(1))
+            },
+        )
+        .await;
+        assert_eq!(primed.latency_ms, Some(1));
+
+        // Bypass run: must really probe (Some(2)) despite the fresh hit.
+        let c = Arc::clone(&calls);
+        let fresh = probe_coalesced(
+            key.clone(),
+            false,
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                result(Some(2))
+            },
+        )
+        .await;
+        assert_eq!(fresh.latency_ms, Some(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // The bypass run refreshed the cache: readers now get Some(2), and
+        // no third probe ran.
+        let cached = probe_coalesced(
+            key,
+            true,
+            || async {
+                panic!("bypass result must have refreshed the cache");
+            },
+        )
+        .await;
+        assert_eq!(cached.latency_ms, Some(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -533,13 +775,17 @@ mod tests {
             let active = Arc::clone(&active);
             let peak = Arc::clone(&peak);
             tasks.push(tokio::spawn(async move {
-                probe_coalesced(unique_key(&format!("global-{i}")), || async move {
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(15)).await;
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    result(Some(10))
-                })
+                probe_coalesced(
+                    unique_key(&format!("global-{i}")),
+                    true,
+                    || async move {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        result(Some(10))
+                    },
+                )
                 .await
             }));
         }

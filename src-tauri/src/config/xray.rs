@@ -23,7 +23,7 @@ use crate::config::punycode::to_ascii_domain;
 use crate::core::kind::CoreKind;
 use crate::domain::{
     DnsAction, DnsRule, DomainMatcher, OutboundMode, ProtocolConfig, ProxyNode, RuleSet,
-    RuleSetStrategy, RuleTarget, RuleType, Transport,
+    RuleSetStrategy, RuleTarget, RuleType, Transport, DOMESTIC_DNS_POOL, REMOTE_DNS_POOL,
 };
 use crate::error::{AppError, AppResult};
 use serde_json::{json, Map, Value};
@@ -301,6 +301,102 @@ fn xray_log_level(level: &str) -> &'static str {
         "error" | "fatal" | "panic" => "error",
         _ => "warning",
     }
+}
+
+/// Inbound tag prefix for sidecar per-node listeners: `in-sc-<port>`.
+pub const SIDECAR_INBOUND_PREFIX: &str = "in-sc";
+
+/// Minimal companion config for the Xray sidecar process
+/// (`settings.xray_sidecar_*`, sing-box main mode only).
+///
+/// One loopback `mixed` inbound per delegated node + that node's normal
+/// outbound, with a 1:1 `inboundTag → outboundTag` routing rule. Deliberately
+/// emits NO Clash API, TUN, DNS module, stats/metrics, geosite/geoip matchers
+/// or user rule sets — the sidecar is a dumb protocol translator behind
+/// sing-box, so it starts without geodata and owns no ports besides its
+/// per-node loopback inbounds. Outbound tags share the main config's
+/// `node-<id[..16]>` space via [`outbound_tag`], and the sing-box side dials
+/// each node through its dedicated inbound port (see
+/// [`crate::config::builder::SidecarPlan`]).
+///
+/// Entries must already be Xray-supported (`CoreKind::Xray.supports_node`) —
+/// the caller computes the delegation plan and falls back to native sing-box
+/// outbounds for anything the sidecar can't speak.
+pub fn build_xray_sidecar_config(entries: &[(ProxyNode, u16)]) -> AppResult<BuiltConfig> {
+    if entries.is_empty() {
+        return Err(AppError::Config(
+            "xray sidecar plan is empty; nothing to delegate".into(),
+        ));
+    }
+
+    let mut inbounds = Vec::new();
+    let mut outbounds = Vec::new();
+    let mut rules = Vec::new();
+    let mut tags = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for (node, port) in entries {
+        let outbound = match node_to_xray_outbound(node) {
+            Ok(outbound) => outbound,
+            Err(e) => {
+                skipped.push(format!("{}: {e}", node.name));
+                continue;
+            }
+        };
+        let tag = outbound_tag(node);
+        let inbound_tag = format!("{SIDECAR_INBOUND_PREFIX}-{port}");
+        inbounds.push(json!({
+            "tag": inbound_tag,
+            "listen": "127.0.0.1",
+            "port": port,
+            "protocol": "mixed",
+            "settings": { "auth": "noauth", "udp": true },
+            "sniffing": sniffing(false),
+        }));
+        outbounds.push(outbound);
+        // 1:1 dispatch: whatever sing-box hands to this inbound egresses
+        // through exactly this node's outbound.
+        rules.push(json!({
+            "type": "field",
+            "inboundTag": [inbound_tag],
+            "outboundTag": tag,
+        }));
+        tags.push(tag);
+    }
+    for reason in &skipped {
+        crate::app_log::warn("xray_sidecar", format!("skipped node: {reason}"));
+    }
+    if tags.is_empty() {
+        return Err(AppError::Config(format!(
+            "failed to map any delegated node to an Xray outbound: {}",
+            skipped.join("; ")
+        )));
+    }
+
+    // Safety net for traffic that somehow misses a per-inbound rule (there
+    // is no selector API, so the sidecar's "current node" is always the
+    // first delegated entry).
+    let selected_tag = tags[0].clone();
+    rules.push(json!({
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": selected_tag.clone(),
+    }));
+
+    let mut config = Map::new();
+    config.insert("log".into(), json!({ "loglevel": "warning" }));
+    config.insert("inbounds".into(), Value::Array(inbounds));
+    config.insert("outbounds".into(), Value::Array(outbounds));
+    let mut routing = Map::new();
+    routing.insert("domainStrategy".into(), json!("AsIs"));
+    routing.insert("rules".into(), Value::Array(rules));
+    config.insert("routing".into(), Value::Object(routing));
+
+    Ok(BuiltConfig {
+        value: Value::Object(config),
+        outbound_tags: tags,
+        selected_tag,
+    })
 }
 
 // —— inbounds ——
@@ -726,16 +822,35 @@ fn build_dns(
 
     let dns_final = opts.dns.normalize_dns_final();
 
-    // Remote resolver (untagged → queries carry dns.tag and route via proxy).
+    // Unified pools (domain::REMOTE/DOMESTIC_DNS_POOL) — the same addresses
+    // sing-box and mihomo resolve from. Remote is DoH over TCP: UDP-less
+    // nodes (socks5 without UDP ASSOCIATE — ssh -D tunnels, cheap relays)
+    // can't carry plaintext-UDP DNS through the proxy, and a dead remote
+    // resolver makes Xray hand unresolved domains to the exit server (read
+    // as a DNS leak by test sites). DoH rides the proxy over TCP, encrypted
+    // end to end; the IP-literal host avoids a bootstrap lookup.
+    //
+    // dns_final is the ONLY fallback: the primary server (index 0) is the
+    // dns_final pool, the second remote entry is in-pool redundancy
+    // (ordered fallback), and every other pool carries skipFallback so it
+    // answers only its own classified domains — never a silent cross-pool
+    // fallback, matching what the DNS-page default resolver promises.
+    //
+    // Remote servers stay untagged so their queries carry dns.tag and
+    // egress through the main outbound; the domestic server is tagged so
+    // its queries egress direct.
     let mut remote = Map::new();
-    remote.insert("address".into(), json!("1.1.1.1"));
+    remote.insert("address".into(), json!(REMOTE_DNS_POOL[0]));
     if !remote_domains.is_empty() {
         remote.insert("domains".into(), json!(remote_domains));
     }
-    // Domestic resolver (tagged → queries route direct). skipFallback unless
-    // it is the primary per dns_final.
+    // Second remote entry: no domains list — pure in-pool fallback for the
+    // primary remote server. Also untagged → also egresses via proxy.
+    let mut remote_backup = Map::new();
+    remote_backup.insert("address".into(), json!(REMOTE_DNS_POOL[1]));
+    // Domestic resolver (tagged → queries route direct).
     let mut domestic = Map::new();
-    domestic.insert("address".into(), json!("223.5.5.5"));
+    domestic.insert("address".into(), json!(DOMESTIC_DNS_POOL[0]));
     domestic.insert("tag".into(), json!(DIRECT_DNS_TAG));
     if !domestic_domains.is_empty() {
         domestic.insert("domains".into(), json!(domestic_domains));
@@ -747,28 +862,56 @@ fn build_dns(
         local.insert("domains".into(), json!(local_domains));
     }
 
+    // Classification-only pools never act as fallback targets.
+    let remote_is_primary = dns_final != "domestic" && dns_final != "local";
+    if !remote_is_primary {
+        remote.insert("skipFallback".into(), json!(true));
+    }
+    if dns_final != "domestic" {
+        domestic.insert("skipFallback".into(), json!(true));
+    }
+    if dns_final != "local" {
+        local.insert("skipFallback".into(), json!(true));
+    }
+
+    // Primary (index 0) = the dns_final pool. Every other pool degrades to
+    // classification-only (skipFallback set above) and is emitted solely
+    // when it has domains to classify.
     match dns_final {
         "domestic" => {
             servers.push(Value::Object(domestic));
-            servers.push(Value::Object(remote));
+            if !local_domains.is_empty() {
+                servers.push(Value::Object(local));
+            }
+            if !remote_domains.is_empty() {
+                servers.push(Value::Object(remote));
+            }
         }
         "local" => {
             servers.push(Value::Object(local));
-            servers.push(Value::Object(remote));
-            servers.push(Value::Object(domestic));
+            if !remote_domains.is_empty() {
+                servers.push(Value::Object(remote));
+            }
+            if !domestic_domains.is_empty() {
+                servers.push(Value::Object(domestic));
+            }
         }
-        // remote (default): remote first, domestic only for its domains.
+        // remote (default): primary + in-pool redundancy, then the other
+        // pools as classification-only entries.
         _ => {
-            domestic.insert("skipFallback".into(), json!(true));
             servers.push(Value::Object(remote));
-            servers.push(Value::Object(domestic));
+            servers.push(Value::Object(remote_backup));
+            if !local_domains.is_empty() {
+                servers.push(Value::Object(local));
+            }
+            if !domestic_domains.is_empty() {
+                servers.push(Value::Object(domestic));
+            }
         }
     }
-    // When leak protection is off, the system resolver is a last-resort
-    // fallback; with it on (default) we never silently fall back to system.
-    if !opts.dns.leak_protect {
-        servers.push(json!("localhost"));
-    }
+    // Note: no localhost/system entry is ever appended — `dns_final` is the
+    // sole fallback in every core (the former leak_protect switch and its
+    // system-resolver escape hatch were removed by design).
     if use_fakeip {
         servers.push(json!("fakedns"));
     }
@@ -802,11 +945,13 @@ fn node_to_xray_outbound(node: &ProxyNode) -> AppResult<Value> {
     if reality
         && !matches!(
             node.transport.as_ref(),
-            None | Some(Transport::Tcp) | Some(Transport::Grpc { .. })
+            None | Some(Transport::Tcp)
+                | Some(Transport::Grpc { .. })
+                | Some(Transport::Xhttp { .. })
         )
     {
         return Err(AppError::Config(
-            "REALITY only supports tcp/grpc transports under Xray".into(),
+            "REALITY only supports tcp/grpc/xhttp transports under Xray".into(),
         ));
     }
     let (protocol, settings) = protocol_settings(node)?;
@@ -1020,6 +1165,7 @@ fn stream_settings(node: &ProxyNode) -> Option<Value> {
             Some(Transport::Grpc { .. }) => "grpc",
             Some(Transport::Http { .. }) => "http",
             Some(Transport::HttpUpgrade { .. }) => "httpupgrade",
+            Some(Transport::Xhttp { .. }) => "xhttp",
         }
     };
 
@@ -1088,6 +1234,20 @@ fn stream_settings(node: &ProxyNode) -> Option<Value> {
                 hu.insert("path".into(), json!(path));
             }
             stream.insert("httpupgradeSettings".into(), Value::Object(hu));
+        }
+        Some(Transport::Xhttp { path, host, mode }) => {
+            let mut xh = Map::new();
+            if let Some(host) = host.as_deref().filter(|s| !s.is_empty()) {
+                xh.insert("host".into(), json!(host));
+            }
+            if let Some(path) = path.as_deref().filter(|p| !p.is_empty()) {
+                xh.insert("path".into(), json!(path));
+            }
+            // Xray defaults to "auto"; only emit an explicit mode when set.
+            if let Some(mode) = mode.as_deref().filter(|m| !m.is_empty()) {
+                xh.insert("mode".into(), json!(mode));
+            }
+            stream.insert("xhttpSettings".into(), Value::Object(xh));
         }
         _ => {}
     }
@@ -1205,6 +1365,7 @@ mod tests {
             block_quic: false,
             bypass_lan: true,
             tun_interface_name: None,
+            sidecar: None,
         }
     }
 
@@ -1293,6 +1454,53 @@ mod tests {
         });
         // The invalid node is skipped; with no other nodes the build fails.
         assert!(build_xray_config(&[node], &default_opts()).is_err());
+    }
+
+    #[test]
+    fn xhttp_stream_shape_and_reality_combo() {
+        // Plain xhttp: path/host land in xhttpSettings, explicit mode kept.
+        let mut node = vless_node("xh", None);
+        node.transport = Some(Transport::Xhttp {
+            path: Some("/upload".into()),
+            host: Some("cdn.example.com".into()),
+            mode: Some("stream-up".into()),
+        });
+        let built = build_xray_config(&[node.clone()], &default_opts()).expect("build");
+        let stream = &built.value["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "xhttp");
+        assert_eq!(stream["xhttpSettings"]["path"], "/upload");
+        assert_eq!(stream["xhttpSettings"]["host"], "cdn.example.com");
+        assert_eq!(stream["xhttpSettings"]["mode"], "stream-up");
+
+        // REALITY + xhttp is a supported Xray combination.
+        node.tls = Some(TlsConfig {
+            enabled: true,
+            server_name: Some("sni.example.com".into()),
+            insecure: None,
+            alpn: None,
+            utls_fingerprint: Some("chrome".into()),
+            reality_public_key: Some("a".repeat(43)),
+            reality_short_id: Some("abcd0123".into()),
+        });
+        let built = build_xray_config(&[node], &default_opts()).expect("build");
+        let stream = &built.value["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "xhttp");
+        assert_eq!(stream["security"], "reality");
+    }
+
+    #[test]
+    fn mihomo_supports_node_rejects_xhttp_but_xray_accepts() {
+        let mut node = vless_node("xh", None);
+        node.transport = Some(Transport::Xhttp {
+            path: Some("/x".into()),
+            host: None,
+            mode: None,
+        });
+        assert!(CoreKind::Xray.supports_node(&node));
+        assert!(!CoreKind::Mihomo.supports_node(&node));
+        // sing-box keeps the node listed (delegation decision happens at
+        // plan/build time) — the supports set itself is protocol-level.
+        assert!(CoreKind::SingBox.supports_node(&node));
     }
 
     #[test]
@@ -1526,16 +1734,36 @@ mod tests {
     #[test]
     fn dns_split_and_tags() {
         let nodes = vec![vless_node("n", None)];
-        let opts = default_opts();
+        let mut opts = default_opts();
+        opts.dns.rules_enabled = true;
+        opts.dns.rules.push(DnsRule {
+            id: "dd1".into(),
+            enabled: true,
+            matcher: DomainMatcher::DomainSuffix,
+            payload: "cn.example".into(),
+            action: DnsAction::Domestic,
+        });
         let built = build_xray_config(&nodes, &opts).expect("build");
         let dns = &built.value["dns"];
         assert_eq!(dns["tag"], "dns-module");
         let servers = dns["servers"].as_array().unwrap();
-        // default dns_final=remote → remote first, domestic tagged skipFallback
-        assert_eq!(servers[0]["address"], "1.1.1.1");
-        assert_eq!(servers[1]["address"], "223.5.5.5");
-        assert_eq!(servers[1]["tag"], "direct-dns");
-        assert_eq!(servers[1]["skipFallback"], true);
+        // default dns_final=remote → remote DoH primary (both pool entries,
+        // second is in-pool redundancy, untagged so it also egresses via
+        // proxy), domestic tagged skipFallback (classification-only).
+        assert_eq!(servers[0]["address"], REMOTE_DNS_POOL[0]);
+        assert_eq!(servers[1]["address"], REMOTE_DNS_POOL[1]);
+        assert!(servers[1].get("skipFallback").is_none());
+        // domestic classification-only: tagged direct, skipFallback, only
+        // carrying the classified domains (builtin LAN suffixes keep the
+        // local server present by default, so look it up instead of
+        // assuming an index).
+        let domestic = servers
+            .iter()
+            .find(|s| s["tag"] == json!("direct-dns"))
+            .expect("domestic classification entry");
+        assert_eq!(domestic["address"], DOMESTIC_DNS_POOL[0]);
+        assert_eq!(domestic["skipFallback"], true);
+        assert_eq!(domestic["domains"], json!(["domain:cn.example"]));
         // routing: direct-dns → direct, dns-module → main target
         let rules = built.value["routing"]["rules"].as_array().unwrap();
         let direct_dns = rules
@@ -1543,6 +1771,74 @@ mod tests {
             .find(|r| r["inboundTag"] == json!(["direct-dns"]))
             .unwrap();
         assert_eq!(direct_dns["outboundTag"], "direct");
+    }
+
+    /// dns_final is the ONLY fallback: with final=domestic the domestic
+    /// server is primary and the remote pool degrades to classification-only
+    /// (skipFallback) instead of acting as a cross-pool fallback.
+    #[test]
+    fn dns_final_domestic_makes_remote_classification_only() {
+        let nodes = vec![vless_node("n", None)];
+        let mut opts = default_opts();
+        opts.dns.dns_final = "domestic".into();
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["address"], DOMESTIC_DNS_POOL[0]);
+        assert_eq!(servers[0]["tag"], "direct-dns");
+        assert!(servers[0].get("skipFallback").is_none());
+        // Remote classification-only when a rule classifies domains to it;
+        // with nothing to classify it is omitted entirely.
+        assert!(
+            servers
+                .iter()
+                .all(|s| s["address"] != json!(REMOTE_DNS_POOL[0])),
+            "unclassified remote pool must not be present as fallback"
+        );
+
+        let mut opts = opts;
+        opts.dns.rules_enabled = true;
+        opts.dns.rules.push(DnsRule {
+            id: "dr1".into(),
+            enabled: true,
+            matcher: DomainMatcher::DomainSuffix,
+            payload: "foreign.example".into(),
+            action: DnsAction::Remote,
+        });
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        let remote = servers
+            .iter()
+            .find(|s| s["address"] == json!(REMOTE_DNS_POOL[0]))
+            .expect("remote classification entry");
+        assert_eq!(remote["skipFallback"], true);
+        assert_eq!(remote["domains"], json!(["domain:foreign.example"]));
+    }
+
+    /// Local-classified domains get the system resolver under any dns_final
+    /// (regression guard: they used to be silently dropped unless the final
+    /// itself was local).
+    #[test]
+    fn local_dns_rules_emit_system_resolver_under_remote_final() {
+        let nodes = vec![vless_node("n", None)];
+        let mut opts = default_opts();
+        opts.dns.rules_enabled = true;
+        opts.dns.rules.push(DnsRule {
+            id: "dl1".into(),
+            enabled: true,
+            matcher: DomainMatcher::DomainSuffix,
+            payload: "corp.internal".into(),
+            action: DnsAction::Local,
+        });
+        let built = build_xray_config(&nodes, &opts).expect("build");
+        let servers = built.value["dns"]["servers"].as_array().unwrap();
+        let local = servers
+            .iter()
+            .find(|s| s["address"] == json!("localhost"))
+            .expect("system resolver present for local-classified domains");
+        assert_eq!(local["skipFallback"], true);
+        // Builtin LAN suffixes ride along; the user rule must be in the list.
+        let domains = local["domains"].as_array().unwrap();
+        assert!(domains.contains(&json!("domain:corp.internal")));
     }
 
     #[test]
@@ -1904,6 +2200,92 @@ mod tests {
         assert!(
             output.status.success(),
             "xray run -test rejected the generated config:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // ---- Xray sidecar companion config ------------------------------------
+
+    #[test]
+    fn sidecar_config_maps_each_inbound_to_its_node() {
+        let mut a = vless_node("a", None);
+        a.id = "aaaa".into();
+        let mut b = vless_node("b", None);
+        b.id = "bbbb".into();
+        let entries = vec![(a, 20890u16), (b, 20891)];
+        let built = build_xray_sidecar_config(&entries).expect("build");
+        let v = &built.value;
+
+        // One loopback mixed inbound per node, 1:1 with the plan ports.
+        let inbounds = v["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 2);
+        assert_eq!(inbounds[0]["listen"], "127.0.0.1");
+        assert_eq!(inbounds[0]["port"], 20890);
+        assert_eq!(inbounds[0]["tag"], "in-sc-20890");
+        assert_eq!(inbounds[1]["port"], 20891);
+
+        // Per-inbound dispatch rule + a final fallback to the first node.
+        let rules = v["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0]["inboundTag"], json!(["in-sc-20890"]));
+        assert_eq!(rules[0]["outboundTag"], built.outbound_tags[0]);
+        assert_eq!(rules[2]["outboundTag"], built.selected_tag);
+
+        // Minimal document: no metrics/dns module, no geodata references —
+        // the sidecar must start without the geosite/geoip assets.
+        assert!(v.get("metrics").is_none());
+        assert!(v.get("dns").is_none());
+        assert!(!v.to_string().contains("geosite"));
+        assert!(!v.to_string().contains("geoip"));
+    }
+
+    #[test]
+    fn sidecar_config_empty_entries_error() {
+        assert!(build_xray_sidecar_config(&[]).is_err());
+    }
+
+    /// Live validation of the sidecar companion config (same harness as
+    /// `live_config_validates`). Needs the bundled dev xray binary:
+    /// `cargo test --lib config::xray::tests::live_sidecar_config_validates -- --ignored`
+    #[test]
+    #[ignore = "needs the bundled dev xray binary"]
+    fn live_sidecar_config_validates() {
+        let bin = crate::core::find_bundled_core(None, CoreKind::Xray)
+            .expect("bundled xray binary — run the fetch-bundled-xray script");
+        // Valid-format x25519 key (43 chars base64url) so the REALITY parser
+        // accepts it — same fixture discipline as live_config_validates.
+        let mut node = vless_node("live", None);
+        node.tls = Some(TlsConfig {
+            enabled: true,
+            server_name: Some("sni.example.com".into()),
+            insecure: None,
+            alpn: None,
+            utls_fingerprint: Some("chrome".into()),
+            reality_public_key: Some("a".repeat(43)),
+            reality_short_id: Some("abcd0123".into()),
+        });
+        let entries = vec![(node, 20890u16)];
+        let built = build_xray_sidecar_config(&entries).expect("build");
+
+        let tmp = std::env::temp_dir().join(format!(
+            "satelite-xray-sidecar-live-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, serde_json::to_vec(&built.value).unwrap()).unwrap();
+        let output = std::process::Command::new(&bin)
+            .args(["run", "-test", "-c"])
+            .arg(&tmp)
+            .output()
+            .expect("spawn xray");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            output.status.success(),
+            "xray run -test rejected the sidecar config:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );

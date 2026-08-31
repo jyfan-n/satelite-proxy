@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   ChainDiagnosis,
@@ -9,6 +9,7 @@ import type {
   GenerateConfigResult,
   ImportResult,
   LatencyBatchResult,
+  LatencyResult,
   ConnectionView,
   NodePool,
   PoolMode,
@@ -26,7 +27,8 @@ import type {
   SubscriptionUrlEntry,
   SubscriptionView,
   DnsSettings,
-  DnsTestResult,
+  DnsDiagnosisReport,
+  ExitIpInfo,
   HostsEntry,
 } from "./types";
 import { trackCoreBusy } from "./coreBusy";
@@ -178,8 +180,8 @@ export function listNodesPage(query: string, sortMode: string, offset = 0, limit
   });
 }
 
-export function listNodeIds(query = "") {
-  return invoke<string[]>("list_node_ids", { query });
+export function listNodeIds(query = "", sortMode: string | null = null) {
+  return invoke<string[]>("list_node_ids", { query, sortMode });
 }
 
 /** Read-only nodes extracted from the selected custom sing-box config (custom mode). */
@@ -221,8 +223,55 @@ function keepSettings(p: Promise<AppSettings>): Promise<AppSettings> {
 function keepProxy(p: Promise<ProxyStatus>): Promise<ProxyStatus> {
   return p.then((status) => {
     proxySnapshot = status;
+    notifyProxySnapshot(status);
     return status;
   });
+}
+
+/**
+ * Push channel for core lifecycle edges (backend `core-status-changed`,
+ * emitted by the watchdog on death/revival). Polling alone leaves pages
+ * stale while hidden or while a capture switch suppresses their poll, so
+ * mounted pages subscribe here and re-render from the refreshed snapshot
+ * the moment the backend announces a change.
+ */
+type ProxySnapshotListener = (status: ProxyStatus) => void;
+const proxySnapshotListeners = new Set<ProxySnapshotListener>();
+
+function notifyProxySnapshot(status: ProxyStatus) {
+  for (const listener of proxySnapshotListeners) listener(status);
+}
+
+/** Subscribe to proxy-status snapshot updates; returns an unsubscribe fn. */
+export function onProxySnapshot(listener: ProxySnapshotListener): () => void {
+  proxySnapshotListeners.add(listener);
+  return () => {
+    proxySnapshotListeners.delete(listener);
+  };
+}
+
+/**
+ * Re-fetch the proxy status and publish it to the snapshot + subscribers.
+ * Used by the backend `core-status-changed` listener and by operation error
+ * paths (a failed start must flip the UI off RUNNING right away). Errors
+ * resolve to null — subscribers keep their last known state.
+ */
+export async function refreshProxyStatus(): Promise<ProxyStatus | null> {
+  try {
+    return await getProxyStatus();
+  } catch {
+    return null;
+  }
+}
+
+/** Fire-and-forget frontend crash reporter → app log (`webview` target,
+ * visible in Logs → 应用日志). Never rejects: a crashing reporter inside an
+ * error path must not produce a second error. */
+export function logFrontendEvent(
+  message: string,
+  level: "warn" | "error" = "error",
+): void {
+  void invoke("log_frontend_event", { level, message }).catch(() => undefined);
 }
 
 export function getSettings() {
@@ -233,6 +282,13 @@ export function getSettings() {
  * Never mutates system settings. */
 export function diagnoseNetwork() {
   return invoke<import("./types").NetworkDiagnosticsResult>("diagnose_network");
+}
+
+/** Exit-IP probe for the dashboard network-probe card: races a few public
+ * IP APIs through the core's mixed inbound (direct when the core is
+ * stopped / Direct outbound mode); first answer wins. */
+export function checkExitIp() {
+  return invoke<ExitIpInfo>("check_exit_ip");
 }
 
 export interface SettingsUpdatePayload {
@@ -273,6 +329,12 @@ export interface SettingsUpdatePayload {
   routeFinal?: string | null;
   /** Resolve originating process per connection (find_process_mode). */
   findProcess?: boolean | null;
+  /** Multi-core mode master switch (sing-box main mode). */
+  multiCoreEnabled?: boolean | null;
+  /** Per-protocol core routing rows (delegations only). */
+  protocolCores?: import("./types").ProtocolCoreItem[] | null;
+  /** Base loopback port for the sidecar's per-node inbounds. */
+  sidecarPort?: number | null;
 }
 
 type SettingsWaiter = {
@@ -323,6 +385,9 @@ function scheduleSettingsWrite() {
       autoSelect: payload.autoSelect ?? null,
       routeFinal: payload.routeFinal ?? null,
       findProcess: payload.findProcess ?? null,
+      multiCoreEnabled: payload.multiCoreEnabled ?? null,
+      protocolCores: payload.protocolCores ?? null,
+      sidecarPort: payload.sidecarPort ?? null,
     })
       .then((settings) => {
         settingsSnapshot = settings;
@@ -403,15 +468,25 @@ export function clearAppLogs() {
   return invoke<void>("clear_app_logs");
 }
 
+/** Truncate the current-hour log file of the given core (multi-core aware). */
+export function clearCoreLog(kind: string) {
+  return invoke<void>("clear_core_log", { kind });
+}
+
 export interface CoreLogTail {
   /** Absolute path of the core's hourly log file, when a session exists. */
   path: string | null;
   lines: string[];
 }
 
-/** Tail of the active core's log (Xray-mode traffic page stand-in). */
-export function getCoreLogTail(limit?: number | null) {
-  return invoke<CoreLogTail>("get_core_log_tail", { limit: limit ?? null });
+/** Tail of a core's log (Xray-mode traffic page stand-in; logs page core
+ *  view). `kind` picks which core's file under multi-core mode — omit for
+ *  the main core's log (legacy behavior). */
+export function getCoreLogTail(limit?: number | null, kind?: string | null) {
+  return invoke<CoreLogTail>("get_core_log_tail", {
+    limit: limit ?? null,
+    kind: kind ?? null,
+  });
 }
 
 export function generateSingboxConfig() {
@@ -503,21 +578,57 @@ export function refreshGeodata(force = false, kind: CoreKind | null = null) {
   return invoke<GeodataInfo>("refresh_geodata", { force, kind });
 }
 
-export function testNodesLatency(ids?: string[] | null, timeoutMs?: number | null) {
+/** Wrap a per-result callback in a Tauri IPC channel so streaming commands
+ * can push each node's probe result the moment it completes. The Rust side
+ * declares the channel as a required arg, so callers without a callback get
+ * a silent one. */
+function latencyResultChannel(onResult?: (r: LatencyResult) => void) {
+  const channel = new Channel<LatencyResult>();
+  channel.onmessage = onResult ?? (() => {});
+  return channel;
+}
+
+export function testNodesLatency(
+  ids?: string[] | null,
+  timeoutMs?: number | null,
+  onResult?: (r: LatencyResult) => void,
+) {
   // Tauri 2 accepts camelCase; include snake_case for compatibility.
   const args: Record<string, unknown> = {
     ids: ids ?? null,
     timeoutMs: timeoutMs ?? null,
     timeout_ms: timeoutMs ?? null,
+    onResult: latencyResultChannel(onResult),
   };
   return invoke<LatencyBatchResult>("test_nodes_latency", args);
 }
 
+/** Fast "Ping 测试": direct TCP connect (30 concurrent), never through the
+ * kernel even while the core is running — raw reachability, not real proxy
+ * latency. Same result shape as testNodesLatency. */
+export function pingNodesLatency(
+  ids?: string[] | null,
+  timeoutMs?: number | null,
+  onResult?: (r: LatencyResult) => void,
+) {
+  const args: Record<string, unknown> = {
+    ids: ids ?? null,
+    timeoutMs: timeoutMs ?? null,
+    timeout_ms: timeoutMs ?? null,
+    onResult: latencyResultChannel(onResult),
+  };
+  return invoke<LatencyBatchResult>("ping_nodes_latency", args);
+}
+
 /** Same TCP probe, for nodes extracted from the selected custom sing-box config (results not persisted). */
-export function testCustomNodesLatency(timeoutMs?: number | null) {
+export function testCustomNodesLatency(
+  timeoutMs?: number | null,
+  onResult?: (r: LatencyResult) => void,
+) {
   const args: Record<string, unknown> = {
     timeoutMs: timeoutMs ?? null,
     timeout_ms: timeoutMs ?? null,
+    onResult: latencyResultChannel(onResult),
   };
   return invoke<LatencyBatchResult>("test_custom_nodes_latency", args);
 }
@@ -583,8 +694,13 @@ export function resetDnsDefaults(section: "servers" | "rules", apply = true) {
   return invoke<DnsSettings>("reset_dns_defaults", { section, apply });
 }
 
-export function testDnsLookup(domain: string) {
-  return invoke<DnsTestResult>("test_dns_lookup", { domain });
+/**
+ * DNS-path diagnosis through the running core: live `/dns/query` resolution
+ * (sing-box/mihomo) plus a local replay of the generated config's decision
+ * chain (which resolver pool, which upstream servers, what matched).
+ */
+export function diagnoseDns(domains: string[]) {
+  return invoke<DnsDiagnosisReport>("diagnose_dns", { domains });
 }
 
 /** Read the OS hosts file as a read-only entry list (for the Hosts UI). */

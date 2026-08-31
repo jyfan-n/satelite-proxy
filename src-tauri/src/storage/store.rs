@@ -1321,7 +1321,11 @@ impl AppStore {
 
     // ---- Node pools -----------------------------------------------------
 
-    pub fn create_pool(&mut self, name: &str, mode: crate::domain::PoolMode) -> AppResult<crate::domain::NodePool> {
+    pub fn create_pool(
+        &mut self,
+        name: &str,
+        mode: crate::domain::PoolMode,
+    ) -> AppResult<crate::domain::NodePool> {
         let n = name.trim();
         if n.is_empty() {
             return Err(AppError::Config("节点池名称不能为空".into()));
@@ -1374,9 +1378,9 @@ impl AppStore {
             .chains
             .iter()
             .filter(|c| {
-                c.hops.iter().any(|h| {
-                    matches!(h, crate::domain::ChainHop::Pool { pool_id } if pool_id == id)
-                })
+                c.hops.iter().any(
+                    |h| matches!(h, crate::domain::ChainHop::Pool { pool_id } if pool_id == id),
+                )
             })
             .map(|c| c.name.clone())
             .collect();
@@ -1410,7 +1414,9 @@ impl AppStore {
                 }
                 for nid in node_ids {
                     if !nodes.iter().any(|s| s.node.id == *nid) {
-                        return Err(AppError::Config(format!("节点池引用了不存在的节点 id：{nid}")));
+                        return Err(AppError::Config(format!(
+                            "节点池引用了不存在的节点 id：{nid}"
+                        )));
                     }
                 }
             }
@@ -1489,20 +1495,48 @@ impl AppStore {
         Ok(chain.clone())
     }
 
+    /// Chain ids this rule set effectively pins in the generated config —
+    /// the same reference semantics the config builders use. A `chain_id`
+    /// left over from an earlier strategy, or one inside a disabled/empty
+    /// set or a disabled rule, produces no route and must not count as a
+    /// reference. Keep in sync with `config::builder`: disabled/empty sets
+    /// are skipped entirely, and only effective rules (the same shape as
+    /// `inline_rule_is_effective`) emit per-rule outbounds.
+    fn chain_refs_in_effective_config(set: &RuleSet) -> Vec<&str> {
+        if !set.enabled || crate::config::rule_set_is_empty_for_config(set) {
+            return Vec::new();
+        }
+        let mut refs: Vec<&str> = Vec::new();
+        if set.strategy == RuleSetStrategy::Chain {
+            if let Some(id) = set.chain_id.as_deref().filter(|s| !s.is_empty()) {
+                refs.push(id);
+            }
+        }
+        refs.extend(
+            set.rules
+                .iter()
+                .filter(|r| {
+                    r.enabled
+                        && r.target == RuleTarget::Chain
+                        && !r.payload.trim().is_empty()
+                        && r.rule_type != RuleType::Geoip
+                })
+                .filter_map(|r| r.chain_id.as_deref().filter(|s| !s.is_empty())),
+        );
+        refs
+    }
+
     /// Distinct rule-set names referencing each chain — the same reference
-    /// detection `delete_chain`'s guard uses (set-level pin OR any single
-    /// rule), deduped per set. Powers the chain list page's "used by N rule
-    /// sets" hint so users can see deletion impact up front.
+    /// detection `delete_chain`'s guard uses, filtered to references that
+    /// actually reach the generated config (see
+    /// [`Self::chain_refs_in_effective_config`]), deduped per set. Powers the
+    /// chain list page's "used by N rule sets" hint so users can see deletion
+    /// impact up front.
     pub fn chain_rule_usage(&self) -> std::collections::BTreeMap<String, Vec<String>> {
         let mut usage: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for set in &self.rule_sets {
-            let mut referenced_ids: Vec<&str> = Vec::new();
-            if let Some(id) = set.chain_id.as_deref() {
-                referenced_ids.push(id);
-            }
-            referenced_ids.extend(set.rules.iter().filter_map(|r| r.chain_id.as_deref()));
-            for id in referenced_ids {
+            for id in Self::chain_refs_in_effective_config(set) {
                 let names = usage.entry(id.to_string()).or_default();
                 if !names.iter().any(|n| n == &set.name) {
                     names.push(set.name.clone());
@@ -1516,19 +1550,8 @@ impl AppStore {
         let referencing_rules: Vec<String> = self
             .rule_sets
             .iter()
-            .flat_map(|set| {
-                let mut names: Vec<String> = Vec::new();
-                if set.chain_id.as_deref() == Some(id) {
-                    names.push(set.name.clone());
-                }
-                names.extend(
-                    set.rules
-                        .iter()
-                        .filter(|r| r.chain_id.as_deref() == Some(id))
-                        .map(|_| set.name.clone()),
-                );
-                names
-            })
+            .filter(|set| Self::chain_refs_in_effective_config(set).contains(&id))
+            .map(|set| set.name.clone())
             .collect();
         if !referencing_rules.is_empty() {
             let mut uniq = referencing_rules;
@@ -1561,12 +1584,16 @@ impl AppStore {
             match hop {
                 ChainHop::Node { node_id } => {
                     if !self.nodes.iter().any(|s| s.node.id == *node_id) {
-                        return Err(AppError::Config(format!("链路引用了不存在的节点 id：{node_id}")));
+                        return Err(AppError::Config(format!(
+                            "链路引用了不存在的节点 id：{node_id}"
+                        )));
                     }
                 }
                 ChainHop::Pool { pool_id } => {
                     if !self.pools.iter().any(|p| p.id == *pool_id) {
-                        return Err(AppError::Config(format!("链路引用了不存在的节点池 id：{pool_id}")));
+                        return Err(AppError::Config(format!(
+                            "链路引用了不存在的节点池 id：{pool_id}"
+                        )));
                     }
                 }
             }
@@ -1757,8 +1784,7 @@ fn store_from_json(value: Value) -> AppStore {
     // is the only load path (the serde derives alone don't run for it), and
     // any field it skips loads as empty and is then wiped from disk by the
     // next save.
-    let (pools, retained_pools) =
-        split_known_items::<crate::domain::NodePool>(obj.get("pools"));
+    let (pools, retained_pools) = split_known_items::<crate::domain::NodePool>(obj.get("pools"));
     store.pools = pools;
     store.retained_pools = retained_pools;
 
@@ -1768,9 +1794,8 @@ fn store_from_json(value: Value) -> AppStore {
     store.retained_chains = retained_chains;
 
     if let Some(aliases) = obj.get("node_aliases") {
-        match serde_json::from_value::<std::collections::BTreeMap<String, String>>(
-            aliases.clone(),
-        ) {
+        match serde_json::from_value::<std::collections::BTreeMap<String, String>>(aliases.clone())
+        {
             Ok(parsed) => store.node_aliases = parsed,
             Err(error) => crate::app_log::warn(
                 "storage",
@@ -2087,7 +2112,14 @@ mod tests {
         let id = store.rule_sets[0].id.clone();
 
         let (updated, _) = store
-            .batch_set_rule_targets(&id, RuleTarget::Node, Some("node-1".into()), vec![], vec![], None)
+            .batch_set_rule_targets(
+                &id,
+                RuleTarget::Node,
+                Some("node-1".into()),
+                vec![],
+                vec![],
+                None,
+            )
             .unwrap();
         // Batch node → whole-set Node strategy + set-level pin; every local
         // rule carries the same pin for per-row display.
@@ -2108,7 +2140,6 @@ mod tests {
                 None,
                 vec!["东京".into(), "东京 ".into()],
                 vec!["香港".into()],
-            
                 None,
             )
             .unwrap();
@@ -2130,7 +2161,6 @@ mod tests {
                 None,
                 vec!["东京".into()],
                 vec!["东京".into()],
-            
                 None,
             )
             .is_err());
@@ -2162,7 +2192,6 @@ mod tests {
                 None,
                 vec![],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2202,7 +2231,14 @@ mod tests {
             node: node_pin,
         });
         let (updated, _) = store
-            .batch_set_rule_targets(&set.id, RuleTarget::Node, Some("n1".into()), vec![], vec![], None)
+            .batch_set_rule_targets(
+                &set.id,
+                RuleTarget::Node,
+                Some("n1".into()),
+                vec![],
+                vec![],
+                None,
+            )
             .unwrap();
         assert_eq!(updated.strategy, RuleSetStrategy::Node);
         assert_eq!(updated.node_id.as_deref(), Some("n1"));
@@ -2218,7 +2254,6 @@ mod tests {
                 None,
                 vec!["东京".into()],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2259,7 +2294,6 @@ mod tests {
                 None,
                 vec!["东京".into()],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2305,7 +2339,6 @@ mod tests {
                 None,
                 vec![],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -2429,7 +2462,10 @@ mod tests {
         assert_eq!(reloaded.chains.len(), 1, "chains must survive reload");
         assert_eq!(reloaded.chains[0].id, chain.id);
         assert_eq!(
-            reloaded.node_aliases.get("identity|原名").map(String::as_str),
+            reloaded
+                .node_aliases
+                .get("identity|原名")
+                .map(String::as_str),
             Some("别名"),
             "node aliases must survive reload"
         );
@@ -3232,7 +3268,6 @@ mod tests {
                 None,
                 vec![],
                 vec![],
-            
                 None,
             )
             .unwrap();
@@ -3437,7 +3472,11 @@ mod tests {
             .unwrap();
         let err = store.delete_pool(&pool.id).unwrap_err();
         assert!(err.to_string().contains("链路引用"));
-        assert_eq!(store.pools.len(), 1, "blocked delete must not remove the pool");
+        assert_eq!(
+            store.pools.len(),
+            1,
+            "blocked delete must not remove the pool"
+        );
     }
 
     #[test]
@@ -3497,7 +3536,7 @@ mod tests {
 
     #[test]
     fn delete_chain_blocked_while_a_rule_set_references_it() {
-        use crate::domain::{ChainHop, RuleSet, RuleSetStrategy};
+        use crate::domain::{ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType};
         let mut store = AppStore::default();
         store.nodes.push(mk_stored_node("n1", "A"));
         store.nodes.push(mk_stored_node("n2", "B"));
@@ -3514,21 +3553,34 @@ mod tests {
                 ],
             )
             .unwrap();
-        let mut set = RuleSet::new_user("规则集", vec![]);
+        // The set must hold at least one effective rule: an empty set emits
+        // nothing to the kernel config, so its whole-set pin is not a live
+        // reference (see chain_usage_ignores_references_that_reach_no_config).
+        let mut set = RuleSet::new_user(
+            "规则集",
+            vec![Rule::new(
+                RuleType::DomainSuffix,
+                "example.com".into(),
+                RuleTarget::Proxy,
+                0,
+            )],
+        );
         set.strategy = RuleSetStrategy::Chain;
         set.chain_id = Some(chain.id.clone());
         store.rule_sets.push(set);
 
         let err = store.delete_chain(&chain.id).unwrap_err();
         assert!(err.to_string().contains("规则集引用"));
-        assert_eq!(store.chains.len(), 1, "blocked delete must not remove the chain");
+        assert_eq!(
+            store.chains.len(),
+            1,
+            "blocked delete must not remove the chain"
+        );
     }
 
     #[test]
     fn chain_rule_usage_dedups_set_level_and_per_rule_references() {
-        use crate::domain::{
-            ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType,
-        };
+        use crate::domain::{ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType};
         let mut store = AppStore::default();
         store.nodes.push(mk_stored_node("n1", "A"));
         store.nodes.push(mk_stored_node("n2", "B"));
@@ -3536,8 +3588,12 @@ mod tests {
             .create_chain(
                 "被引用链",
                 vec![
-                    ChainHop::Node { node_id: "n1".into() },
-                    ChainHop::Node { node_id: "n2".into() },
+                    ChainHop::Node {
+                        node_id: "n1".into(),
+                    },
+                    ChainHop::Node {
+                        node_id: "n2".into(),
+                    },
                 ],
             )
             .unwrap();
@@ -3573,10 +3629,85 @@ mod tests {
 
         let usage = store.chain_rule_usage();
         let names = &usage[&chain.id];
-        assert_eq!(names.len(), 2, "set A counted once despite two reference levels");
+        assert_eq!(
+            names.len(),
+            2,
+            "set A counted once despite two reference levels"
+        );
         assert!(names.contains(&"集合A".to_string()));
         assert!(names.contains(&"集合B".to_string()));
         assert!(!names.contains(&"集合C".to_string()));
+    }
+
+    #[test]
+    fn chain_usage_ignores_references_that_reach_no_config() {
+        use crate::domain::{ChainHop, Rule, RuleSet, RuleSetStrategy, RuleTarget, RuleType};
+        let mut store = AppStore::default();
+        store.nodes.push(mk_stored_node("n1", "A"));
+        store.nodes.push(mk_stored_node("n2", "B"));
+        let chain = store
+            .create_chain(
+                "被引用链",
+                vec![
+                    ChainHop::Node {
+                        node_id: "n1".into(),
+                    },
+                    ChainHop::Node {
+                        node_id: "n2".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        let chain_rule = |name: &str| {
+            let mut r = Rule::new(
+                RuleType::DomainSuffix,
+                format!("{name}.com"),
+                RuleTarget::Chain,
+                0,
+            );
+            r.chain_id = Some(chain.id.clone());
+            r
+        };
+
+        // Whole-set pin but every rule deleted: the empty set reaches no
+        // generated config, so the pin is not a live reference (the reported
+        // bug — usage stayed after the rules were removed).
+        let mut emptied = RuleSet::new_user("已清空", vec![]);
+        emptied.strategy = RuleSetStrategy::Chain;
+        emptied.chain_id = Some(chain.id.clone());
+        // Strategy flipped away from Chain while the stale pin fields linger.
+        let mut flipped = RuleSet::new_user("已改策略", vec![chain_rule("flipped")]);
+        flipped.chain_id = Some(chain.id.clone());
+        flipped.rules[0].target = RuleTarget::Proxy;
+        // Disabled per-rule chain reference inside an otherwise live set.
+        let mut has_disabled = RuleSet::new_user("含停用规则", vec![chain_rule("off")]);
+        has_disabled.rules[0].enabled = false;
+        has_disabled.rules.push(Rule::new(
+            RuleType::DomainSuffix,
+            "live.com".into(),
+            RuleTarget::Proxy,
+            10,
+        ));
+        // Disabled set entirely.
+        let mut disabled_set = RuleSet::new_user("已停用", vec![chain_rule("ds")]);
+        disabled_set.enabled = false;
+        store.rule_sets.push(emptied);
+        store.rule_sets.push(flipped);
+        store.rule_sets.push(has_disabled);
+        store.rule_sets.push(disabled_set);
+
+        let usage = store.chain_rule_usage();
+        assert!(
+            !usage.contains_key(&chain.id),
+            "no live reference remains, usage must be empty: {:?}",
+            usage
+        );
+        // The delete guard shares the same semantics: the chain is deletable.
+        store.delete_chain(&chain.id).expect(
+            "stale/empty references must not block deletion — \
+             usage display and the delete guard must agree",
+        );
+        assert!(store.chains.is_empty());
     }
 
     #[test]

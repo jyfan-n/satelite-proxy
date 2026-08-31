@@ -1482,88 +1482,26 @@ tr.row-active {
 
 /* Section titles inside the Settings version tab: the app's own version
    card below the kernel rows. */
-.version-block-title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  margin: 0.55rem 0 0.05rem;
-  padding: 0 0.15rem;
-}
-
-/* Version tab: two panels side by side — the kernel list on the left, the
-   app's own version card on the right. Grid rows stretch by default, so the
-   cards in both columns share the taller one's height. */
-.settings-panel.version-split {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+/* —— Version tab: three kernel cards in a row, app version as a full-width
+   bar underneath. Designed to fit the tab without scrolling: each kernel is
+   a compact vertical card (identity → platform → version → meta → actions →
+   path), and the app card collapses into a two-line bar. */
+.settings-panel.version-v3 {
+  display: flex;
+  flex-direction: column;
   gap: 0.85rem;
 }
 
-.version-col {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  min-width: 0;
+/* auto-fit: three columns at the 960px pro window, gracefully 2/1 below. */
+.version-core-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+  gap: 0.85rem;
+  align-items: stretch;
 }
 
-/* Equal-height pairing: the card fills whatever height its column got, so
-   the shorter (app) card always matches the kernel side. */
-.version-col > .core-card {
-  flex: 1 1 auto;
-}
-
-.version-split .version-block-title {
-  margin: 0.1rem 0 0;
-}
-
-.version-split .core-card {
+.version-v3 .core-card {
   max-width: none;
-}
-
-/* Default app window is 960px — keep the pair side by side below that and
-   only stack on genuinely narrow windows. */
-@media (max-width: 760px) {
-  .settings-panel.version-split {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* Active kernel row inside the shared list card: the selected radio gets a
-   subtle accent tint (rounded, so it reads as one highlighted slot). */
-.kernel-row.core-active {
-  background: color-mix(in srgb, var(--primary) 7%, transparent);
-  border-radius: 10px;
-}
-
-/* —— Version tab: one kernel card, two compact rows ——
-   Both cores live in a single list card. Each row is one tight block: an
-   identity line (mark / name / enable radio / pills / platform / current
-   version), a meta line (bundled · latest plus the check/download actions),
-   and a quiet foot line (running dot + truncated path + copy). */
-.kernel-list {
-  padding: 0.4rem 0.5rem;
-}
-
-.kernel-row {
-  display: flex;
-  flex-direction: column;
-  gap: 0.42rem;
-  padding: 0.6rem 0.65rem;
-}
-
-/* Hairline between the two cores; the active row's tint stays inset. */
-.kernel-row + .kernel-row {
-  margin-top: 0.3rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
-}
-
-.kernel-row-main {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  min-width: 0;
 }
 
 /* Core monogram tile — CoreMark SVG glyph (cube / bolt / cat head) inherits
@@ -1580,23 +1518,43 @@ tr.row-active {
   height: 1.05rem;
 }
 
-/* Fixed name slot: "sing-box" and "Xray" differ in length — a shared basis
-   keeps the radio / hint / pill / platform columns aligned across rows. */
+/* —— Kernel card (one per core, three side by side) ——
+   Vertical stack: head (mark / name / pill / radio) → platform → current
+   version → bundled·latest meta → actions → foot (running + path). */
+.kernel-card {
+  display: flex;
+  flex-direction: column;
+  /* Airy spacing (+~20% height over the compact first cut, then another
+     +20%): larger row gap plus taller vertical padding breathe out the
+     card without adding rows. */
+  gap: 1.2rem;
+  padding: 1.75rem 1.1rem;
+  min-width: 0;
+}
+
+/* Active kernel card: accent border + tint — the selected core reads at a
+   glance among the three equal cards. */
+.kernel-card.core-active {
+  border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+
+.kernel-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.kernel-card-head .core-radio {
+  margin-left: auto;
+}
+
+/* Name truncates if a future core name outgrows the card. */
 .kernel-name {
-  flex: 0 0 4.3rem;
   font-size: 0.95rem;
   font-weight: 650;
   letter-spacing: 0.01em;
-  white-space: nowrap;
-}
-
-/* Small click-to-switch hint beside the radio; fixed slot so the empty
-   (active-core) row keeps the same column geometry. */
-.kernel-switch-hint {
-  flex: 0 0 3rem;
-  min-width: 0;
-  font-size: 0.68rem;
-  letter-spacing: 0.02em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1640,9 +1598,8 @@ tr.row-active {
   transform: scale(1);
 }
 
-.kernel-platform {
-  flex: 0 1 auto;
-  min-width: 0;
+.kernel-card-platform {
+  margin-top: -0.2rem;
   font-size: 0.7rem;
   letter-spacing: 0.03em;
   white-space: nowrap;
@@ -1650,33 +1607,31 @@ tr.row-active {
   text-overflow: ellipsis;
 }
 
+.kernel-card-ver {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
 .kernel-version {
-  margin-left: auto;
-  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  font-size: 1.02rem;
+  min-width: 0;
+  font-size: 1rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.kernel-row-meta {
+.kernel-card-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.3rem 0.55rem;
+  gap: 0.3rem 0.7rem;
   color: var(--muted);
-  font-size: 0.76rem;
-}
-
-.kernel-meta-item {
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.kernel-meta-sep {
-  opacity: 0.7;
+  font-size: 0.72rem;
 }
 
 .kernel-row-actions {
@@ -1684,6 +1639,17 @@ tr.row-active {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+/* Inside the vertical kernel card: actions sit flush left, and the path foot
+   pins to the card bottom so all three equal-height cards line up. */
+.kernel-card .kernel-row-actions {
+  margin-left: 0;
+  flex-wrap: wrap;
+}
+
+.kernel-card .kernel-row-foot {
+  margin-top: auto;
 }
 
 .kernel-row-foot {
@@ -1731,17 +1697,139 @@ tr.row-active {
   max-width: 48rem;
 }
 
-/* —— Version tab: app card hero row + update strip ——
-   Only the app card keeps the .ver-hero / .ver-grid anatomy (kernel cores
-   are compact .kernel-row lists): a mark tile with the name/tagline on the
-   left, the big current version on the right, then a stats/actions grid and
-   the quiet project/sponsor links along the bottom hairline. */
+/* —— Multi-core mode tab (sidecar) ——
+   One enable row (title + running pill + switch) and, when enabled, the
+   protocol→core table + base-port field. */
 
-.ver-hero {
+.sidecar-card {
+  width: 100%;
+  max-width: 48rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1rem 1.05rem;
+}
+
+.sidecar-card .via-proxy-row {
+  align-items: center;
+}
+
+.sidecar-pill {
+  margin-left: 0.5rem;
+}
+
+.sidecar-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.18));
+  padding-top: 0.7rem;
+}
+
+.sidecar-warn {
+  color: var(--warning);
+}
+
+/* Protocol→core table: protocol column + per-row core select. */
+.multicore-table td {
+  vertical-align: middle;
+}
+
+.multicore-table .sidecar-tag {
+  margin-left: 0.45rem;
+  font-size: 0.62rem;
+  padding: 0.05rem 0.4rem;
+}
+
+.multicore-table .solid-select {
+  width: 100%;
+  min-width: 9rem;
+}
+
+/* Delegated-protocol badge on node rows (list + grid). */
+.sidecar-tag {
+  margin-left: 0.35rem;
+  font-size: 0.62rem;
+  padding: 0.05rem 0.4rem;
+}
+
+/* —— Version tab: app bar (full width under the kernel cards) ——
+   Two compact lines: identity + versions + actions, then a quiet meta strip
+   (last check · platform · stack · exe path) and the link row. */
+
+.app-bar {
+  display: flex;
+  flex-direction: column;
+  /* +10% height over the base .core-card padding: taller vertical padding
+     plus slightly roomier row gaps. */
+  gap: 0.7rem;
+  padding: 1.3rem 1.15rem;
+}
+
+.app-bar-main {
   display: flex;
   align-items: center;
   gap: 0.85rem;
-  margin-bottom: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.app-bar-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-right: 0.4rem;
+}
+
+.app-bar-ver,
+.app-bar-latest {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex-shrink: 0;
+}
+
+/* Current + latest are twin label/value columns: give both values identical
+   metrics so the pair reads as one aligned row (they used to diverge — 1.08rem
+   vs the late .mono rule's 0.78rem). The shared line-height stays taller than
+   the status pill so the latest column keeps the same height (and thus stays
+   centered in line) whether or not a pill is showing. */
+.app-bar-ver .ver-ver,
+.app-bar-latest .ver-stat {
+  justify-content: flex-start;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.app-bar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.app-bar-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  min-width: 0;
+}
+
+.app-bar-meta {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* The exe path is the flexible item — it truncates instead of wrapping. */
+.app-bar-foot .kernel-path {
+  flex: 0 1 auto;
+  min-width: 6rem;
 }
 
 .ver-mark {
@@ -1787,16 +1875,6 @@ tr.row-active {
   letter-spacing: 0.03em;
 }
 
-.ver-side {
-  margin-left: auto;
-  text-align: right;
-  flex-shrink: 0;
-}
-
-.ver-side .stat-label {
-  margin-bottom: 0.2rem;
-}
-
 .ver-ver {
   display: flex;
   align-items: center;
@@ -1807,30 +1885,6 @@ tr.row-active {
   font-variant-numeric: tabular-nums;
 }
 
-/* Stats + actions row. Flex-wrap (not a fixed grid): the version cards sit
-   side by side, so this row must adapt to card width, not viewport width. */
-.ver-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem 1.1rem;
-  align-items: center;
-  margin-bottom: 0.65rem;
-  font-size: 0.9rem;
-}
-
-.ver-grid > div:not(.ver-grid-actions) {
-  min-width: 7.2rem;
-}
-
-.ver-grid-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
 .ver-stat {
   display: flex;
   align-items: center;
@@ -1838,9 +1892,8 @@ tr.row-active {
   font-variant-numeric: tabular-nums;
 }
 
-/* Quiet link row along the card's bottom hairline. margin-top:auto anchors
-   it to the card bottom: when equal-height stretching gives the app card
-   extra room, the slack lands above this row instead of trailing space. */
+/* Quiet link row along the card's bottom hairline — in the app bar it ends
+   the card with a hairline and keeps its links to the right. */
 .ver-links {
   display: flex;
   align-items: center;
@@ -1848,53 +1901,6 @@ tr.row-active {
   margin-top: auto;
   padding-top: 0.7rem;
   border-top: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
-}
-
-/* Equal-height stretching hands the app card slack. Split it in half: one
-   auto margin above the path row, one above the link row — two modest gaps
-   read as breathing room instead of one dead block. */
-.app-card .kernel-row-foot {
-  margin-top: auto;
-}
-
-/* App card info rows (last check / platform / stack): quiet inset panel
-   that fills the stretched card with real content. Labels echo the
-   .stat-label look (mono uppercase); values are right-aligned mono. */
-.app-info-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--text) 3%, transparent);
-}
-
-.app-info-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
-  min-width: 0;
-}
-
-.app-info-label {
-  flex-shrink: 0;
-  font-family: var(--mono);
-  font-size: 0.62rem;
-  text-transform: uppercase;
-  letter-spacing: 1.4px;
-  color: var(--muted);
-}
-
-.app-info-value {
-  min-width: 0;
-  font-family: var(--mono);
-  font-size: 0.74rem;
-  text-align: right;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .ver-links .corner-link {
@@ -1913,14 +1919,6 @@ tr.row-active {
 /* Sponsor easter-egg popup: portaled to <body> and fixed above the trigger
    button (inline position passed from the button's bounding rect at click
    time), so opening it never reflows the version cards. */
-
-@media (max-width: 720px) {
-  .ver-grid-actions {
-    /* Own line, aligned with the stats when the viewport gets tight. */
-    margin-left: 0;
-    justify-content: flex-start;
-  }
-}
 
 /* Transient download progress inside a compact kernel row: replaces the
    usual breathing room only while a download is in flight. */
@@ -1999,6 +1997,12 @@ tr.row-active {
 .nodes-toolbar {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+/* Grouping seg + view seg always share one wrapped row (never split). */
+.nodes-view-segs {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .segmented.compact {
@@ -2113,6 +2117,88 @@ tr.row-active {
 .node-virtual-row {
   height: 49px;
 }
+
+/* —— Nodes page grouping (subscription / protocol / country) ——
+   Header rows share the node row height so the fixed-size virtualizer
+   math stays exact; the grid header spans all columns at card height and
+   is padded with filler cells to keep the per-cell indexing aligned. */
+.node-group-row > td {
+  height: 30px;
+  padding: 0 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 7%, transparent);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.node-group-caret {
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-size: 0.7em;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.node-group-caret.closed {
+  transform: rotate(-90deg);
+}
+
+.node-group-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.5rem;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--muted) 7%, transparent);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.node-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.node-group-flag {
+  font-size: 1.05em;
+}
+
+.node-group-count {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+
+/* —— 单点测试 armed: every node wears a green outline so the
+   click-to-test affordance stays visible across the whole list/grid.
+   Cards take a real border + soft glow; table rows draw theirs via the
+   cells (tr can't carry borders reliably under border-collapse). */
+.spot-armed .node-card {
+  border-color: var(--success-border);
+  box-shadow:
+    0 0 0 1px var(--success-border),
+    0 0 10px color-mix(in srgb, var(--success) 20%, transparent);
+}
+
+.spot-armed .node-virtual-row > td {
+  border-top: 1px solid var(--success-border);
+  border-bottom: 1px solid var(--success-border);
+}
+
+.spot-armed .node-virtual-row > td:first-child {
+  border-left: 1px solid var(--success-border);
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
+.spot-armed .node-virtual-row > td:last-child {
+  border-right: 1px solid var(--success-border);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
 
 .node-virtual-spacer > td {
   padding: 0;
@@ -2235,7 +2321,7 @@ button.node-card:disabled,
 
 .node-card-name {
   font-weight: 600;
-  font-size: 0.85rem;
+  font-size: 0.8rem; /* 12.8px */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3376,7 +3462,9 @@ button.small {
 /* config — compact FlClash-like subscription cards */
 .sub-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 210px min → exactly 4 columns in the fixed 960px pro window (content
+     ≈912px after .main gutters); 240px only fit 3. */
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 0.65rem;
   align-items: stretch;
 }
@@ -3473,9 +3561,11 @@ button.mix-on {
   color: var(--warn);
 }
 
-.sub-card-foot {
+/* Relative "updated x hours ago" in the card's title row, before the ⋮ menu */
+.sub-card-updated {
   font-size: 0.7rem;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 /* FlClash SubscriptionInfoView: bar then "used / total · expire" */
@@ -3516,17 +3606,37 @@ button.mix-on {
 
 .traffic-line {
   display: flex;
-  flex-wrap: wrap;
+  /* Single line, never wraps: used/total stays intact, the expire label
+     shrinks into an ellipsis when the card is too narrow. */
+  flex-wrap: nowrap;
   align-items: baseline;
   gap: 0.2rem 0.35rem;
   font-size: 0.72rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The traffic figures keep their full width; only the tail label squeezes. */
+.traffic-line > span:first-child {
+  flex-shrink: 0;
 }
 
 .traffic-line .dot-sep {
   opacity: 0.55;
+  flex-shrink: 0;
+}
+
+/* Expire / remaining-time label: fills whatever line space is left and
+   ellipsizes when too long; full text stays in the tooltip. */
+.traffic-line .traffic-expire {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .sub-card-top-right {
@@ -3892,7 +4002,6 @@ code {
   grid-column: 1 / -1;
 }
 
-.dns-cell-fakeip,
 .dns-cell-diag {
   min-width: 0;
 }
@@ -3936,7 +4045,7 @@ code {
 }
 
 .dns-stack.dns-grid.dns-section-settings {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .dns-section-settings .dns-cell-general {
@@ -3944,13 +4053,8 @@ code {
   grid-row: 1;
 }
 
-.dns-section-settings .dns-cell-fakeip {
-  grid-column: 1;
-  grid-row: 2;
-}
-
 .dns-section-settings .dns-cell-diag {
-  grid-column: 2;
+  grid-column: 1 / -1;
   grid-row: 2;
 }
 
@@ -3960,7 +4064,6 @@ code {
   }
 
   .dns-section-settings .dns-cell-general,
-  .dns-section-settings .dns-cell-fakeip,
   .dns-section-settings .dns-cell-diag {
     grid-column: auto;
     grid-row: auto;
@@ -4038,23 +4141,26 @@ code {
   padding-bottom: 0;
 }
 
-/* General: mode + toggles side by side (50% / 50%) */
+/* General: hijack · fallback / cache · FakeIP in a 2×2 grid */
 .dns-general-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0;
   padding: 0;
 }
 
-.dns-general-primary {
-  border-right: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
-  min-width: 0;
+/* No separators inside a cell pair; divide the two columns with a line on
+   the 2nd-column cells and the two rows with a line on the 2nd-row cells. */
+.dns-general-body .dns-setting-row {
+  border-bottom: none;
 }
 
-.dns-general-toggles {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
+.dns-general-body .dns-setting-row:nth-child(2n) {
+  border-left: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+}
+
+.dns-general-body .dns-setting-row:nth-child(n+3) {
+  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
 }
 
 @media (max-width: 720px) {
@@ -4062,9 +4168,12 @@ code {
     grid-template-columns: 1fr;
   }
 
-  .dns-general-primary {
-    border-right: none;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  .dns-general-body .dns-setting-row:nth-child(2n) {
+    border-left: none;
+  }
+
+  .dns-general-body .dns-setting-row + .dns-setting-row {
+    border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
   }
 }
 
@@ -4452,78 +4561,208 @@ button.check.on {
   margin-top: 0 !important;
 }
 
-.dns-test-card {
-  margin: 0.35rem 0.95rem 0.5rem;
-  padding: 0.85rem 0.95rem;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
+/* —— DNS 诊断（内核级查询路径，规则列表风格表格） —— */
+.dns-diag-toolbar {
   display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  font-size: 0.85rem;
-}
-
-.dns-test-card.ok {
-  border-color: #bbf7d0;
-  background: var(--success-muted);
-}
-
-.dns-test-card.fail {
-  border-color: #fecaca;
-  background: var(--danger-bg);
-}
-
-.dns-test-top {
-  display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 0.45rem 0.65rem;
+  gap: 0.6rem;
+  padding: 0.45rem 0.55rem 0.6rem;
 }
 
-.dns-test-badge {
+.dns-diag-toolbar .dns-diag-add {
+  flex: 1;
+  gap: 0.5rem;
+}
+
+.dns-diag-toolbar .dns-diag-add input {
+  margin-top: 0 !important;
+  border: 1px solid var(--input-border, var(--border));
+  border-radius: 8px;
+  padding: 0.42rem 0.7rem;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.dns-diag-toolbar .dns-diag-add input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-muted);
+}
+
+.dns-diag-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  padding: 0 0.55rem 0.45rem;
+  font-size: 0.78rem;
+}
+
+.dns-diag-run {
   font-size: 0.7rem;
   font-weight: 700;
-  padding: 0.1rem 0.4rem;
+  padding: 0.1rem 0.45rem;
   border-radius: 999px;
-  background: var(--border-subtle);
-  color: var(--text);
+  background: var(--danger-bg);
+  color: #991b1b;
 }
 
-.dns-test-card.ok .dns-test-badge {
+.dns-diag-run.on {
   background: var(--success-muted);
   color: #166534;
 }
 
-.dns-test-card.fail .dns-test-badge {
-  background: rgba(248,81,73,0.2);
+.dns-diag-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Fixed layout so every text cell truncates with ellipsis and the action
+   column always stays visible (same trick as .rules-table). */
+.dns-diag-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.dns-diag-table .col-domain {
+  width: 21%;
+}
+
+.dns-diag-table .col-strategy {
+  width: 5.5rem;
+}
+
+.dns-diag-table .col-match {
+  width: 26%;
+}
+
+.dns-diag-table .col-server {
+  width: 22%;
+}
+
+.dns-diag-table .col-actions {
+  width: 3.6rem;
+}
+
+tr.dns-diag-tr:hover {
+  background: var(--surface-2);
+}
+
+.dns-diag-table td {
+  font-size: 0.78rem;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dns-diag-td-domain {
+  font-weight: 600;
+}
+
+/* Cells stay table-cell (a flex td breaks row-height sharing → ragged
+   borders); alignment happens on inner inline-flex wrappers instead. */
+.dns-diag-strategy-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.dns-diag-actions-inner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.15rem;
+}
+
+.dns-diag-td-actions .icon-btn {
+  padding: 0.15rem 0.35rem;
+}
+
+.dns-diag-pill {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  background: var(--border-subtle);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.dns-diag-pill.remote {
+  background: var(--primary-muted);
+}
+
+.dns-diag-pill.domestic {
+  background: rgba(34, 211, 238, 0.16);
+}
+
+.dns-diag-pill.local {
+  background: var(--success-muted);
+  color: #166534;
+}
+
+.dns-diag-pill.block {
+  background: rgba(248, 81, 73, 0.2);
   color: #991b1b;
 }
 
-.dns-test-addrs {
-  white-space: pre-wrap;
-  line-height: 1.45;
-  color: var(--text);
+.dns-diag-pill.hosts {
+  background: rgba(167, 139, 250, 0.18);
 }
 
-.dns-test-note {
-  font-size: 0.75rem;
-  color: var(--muted);
+.dns-diag-pill.fakeip {
+  background: rgba(251, 191, 36, 0.18);
 }
 
-.dns-empty {
-  padding: 1.5rem 1.1rem;
-  text-align: center;
-  font-size: 0.85rem;
-  color: var(--muted);
+/* Local/domestic resolution = plaintext queries visible to the ISP. */
+.dns-diag-pill.leak {
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
 }
 
-.dns-empty.soft {
-  margin: 0.25rem 0.95rem 0.5rem;
-  padding: 1.25rem;
+.dns-diag-approx {
+  font-size: 0.66rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
   border: 1px dashed var(--border);
-  border-radius: 10px;
-  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.dns-diag-ok {
+  color: #166534;
+}
+
+[data-theme="aerospace"] .dns-diag-ok {
+  color: #4ade80;
+}
+
+.dns-diag-fail {
+  color: #991b1b;
+}
+
+[data-theme="aerospace"] .dns-diag-fail {
+  color: #f87171;
+}
+
+/* —— FakeIP 行内控件 + 详情弹窗 —— */
+.dns-fakeip-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.dns-fakeip-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.dns-fakeip-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding-top: 0.25rem;
 }
 
 .field-hint {
@@ -5200,6 +5439,35 @@ button.check.on {
 
 .instrument-kv .kv-v {
   color: var(--muted);
+}
+
+/* Exit-IP row of the network-probe card: keep long IPv6 answers on one
+   line, country code + direct badge trail after the address. */
+.instrument-kv .kv-v.exit-ip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: calc(100% - 4.55rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.instrument-kv .kv-v.exit-ip .lat-spinner {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+
+.exit-ip-direct {
+  flex: none;
+  font-size: 0.6rem;
+  line-height: 1;
+  padding: 0.14rem 0.3rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  color: var(--warning);
 }
 
 .kv-v-badge {
@@ -6144,6 +6412,7 @@ button.check.on {
   );
 }
 
+
 /* —— Glass switch (frosted toggle, same family) —— */
 .glass-switch {
   appearance: none;
@@ -6799,28 +7068,44 @@ select:not([size]):disabled {
   white-space: nowrap;
 }
 
-/* —— Traffic page core-log tab (Xray mode) ——
-   Reuses the Logs page toolbar/panel anatomy. Core lines carry no separate
-   timestamp/target columns (both live inside the message text), so the row
-   grid drops to level + message. */
-.core-log-tab {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.core-log-tab .logs-panel {
-  flex: 1 1 auto;
-}
+/* —— Core log lines (Logs page kernel-log view) ——
+   The timestamp is parsed out of the raw message (ANSI codes stripped,
+   zone offset dropped), so the row grid is ts + level + message — the ts
+   column is slightly wider than the app log's to fit the `MM-DD HH:MM:SS`
+   fallback for lines from another day. */
 
 .log-line.core-log-line {
-  grid-template-columns: 52px 1fr;
+  grid-template-columns: 104px 52px 1fr;
 }
 
-.core-log-count {
-  flex: none;
-  font-size: 12px;
+/* Running indicator inside the kernel log tabs (green = process alive). */
+.seg-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--muted);
+  opacity: 0.4;
+}
+
+.seg-dot.on {
+  background: var(--success);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--success);
+}
+
+/* Logs page kernel-log view: core picker + source file path foot line. */
+.logs-toolbar .solid-select {
+  min-width: 7.5rem;
+}
+
+.logs-core-path {
+  margin: 0.4rem 0.2rem 0;
+  font-size: 11px;
+  word-break: break-all;
+  user-select: text;
 }
 
 button.active-soft {
@@ -7614,6 +7899,153 @@ button.active-soft {
   pointer-events: none;
 }
 
+/* —— simple-spark fullscreen toggle（首页实时活动卡右上角） —— */
+
+.simple-spark-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.simple-spark-fs {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  font-size: 0;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.simple-spark-fs:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.simple-spark-fs svg {
+  display: block;
+}
+
+.simple-spark-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 46;
+  background: var(--overlay);
+}
+
+/* Expanded: the card leaves the grid (fixed overlay above page content and
+   the z-40 topnav, below z-50 form modals / z-60 error modal + toast) and
+   fills the window; a placeholder keeps its grid cell so the other five
+   cards keep their spots. Selector keeps (0,3,0) so the !important padding
+   here wins over `.instrument-grid > .simple-spark`. */
+.instrument-grid > .simple-spark.expanded {
+  position: fixed;
+  inset: 1.1rem;
+  z-index: 47;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 1rem 1.25rem 0.9rem !important;
+  cursor: default;
+  /* Opaque panel in fullscreen — the translucent --surface would let the
+     page bleed through the oversized canvas (same rationale as .modal). */
+  background: var(--panel-solid) !important;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.38) !important;
+  animation: spark-expand-in var(--page-enter-ms, 240ms)
+    cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes spark-expand-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .instrument-grid > .simple-spark.expanded {
+    animation: none;
+  }
+}
+
+.simple-spark-placeholder {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Freeze the scroll container behind the overlay; .main's reserved
+   scrollbar-gutter keeps the layout from shifting sideways. */
+html.spark-fullscreen-open .main {
+  overflow: hidden;
+}
+
+/* Expanded scale-up: bigger type so the larger canvas doesn't read sparse.
+   Rails widen to feed the longer arcs. */
+.instrument-grid > .simple-spark.expanded .instrument-label {
+  font-size: 0.82rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-tag {
+  font-size: 0.7rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-legend {
+  font-size: 0.78rem;
+  gap: 0.35rem 0.55rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-conns {
+  font-size: 0.85rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-fs {
+  width: 1.8rem;
+  height: 1.8rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-fs svg {
+  width: 15px;
+  height: 15px;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-flow {
+  grid-template-columns: auto minmax(0, 1fr) 11rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-rail.left {
+  max-width: 11rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-rail-kicker {
+  font-size: 0.64rem;
+  padding-bottom: 0.3rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-col {
+  padding: 0.1rem 0 0.2rem;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-col li {
+  font-size: 0.8rem;
+  line-height: 1.35;
+  padding: 0.12rem 0;
+}
+
+.instrument-grid > .simple-spark.expanded .simple-spark-idle {
+  font-size: 0.95rem;
+}
+
 .simple-page-head {
   display: flex;
   align-items: flex-start;
@@ -8380,6 +8812,17 @@ li.virt-pad {
 .chain-menu-pop.up {
   bottom: calc(100% + 4px);
   top: auto;
+}
+
+/* An open ⋮ popover must paint above the cards that follow it: .card's
+   deliberate isolation (navbar-repaint fix, see .card) traps the popover's
+   z-index inside that card's own stacking context, so later sibling cards
+   would cover it. Lift the whole source card while its menu is open — the
+   same :has idiom the DNS panels use. */
+.chain-card:has(.chain-menu-pop),
+.chain-pool-list:has(.chain-menu-pop) {
+  position: relative;
+  z-index: 30;
 }
 
 /* Live keyword-filter feedback in the pool editor: match count + a one-line

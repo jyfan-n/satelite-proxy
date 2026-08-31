@@ -2,14 +2,15 @@
 
 use crate::api::{ClashApi, ConnectionInfo, RequestRecord, TrafficTotals, XrayMetrics};
 use crate::config::{
-    build_mihomo_config, build_singbox_config, build_xray_config, generate_api_secret,
-    inspect_singbox_config, outbound_tag, write_active_config, write_active_yaml_config,
-    write_custom_config, BuildOptions,
+    build_mihomo_config, build_singbox_config, build_xray_config, build_xray_sidecar_config,
+    generate_api_secret, inspect_singbox_config, outbound_tag, write_active_config,
+    write_active_yaml_config, write_custom_config, write_xray_sidecar_config, BuildOptions,
+    SidecarPlan,
 };
 use crate::core::manager::{CoreManager, CoreState};
 use crate::core::resolve_core_bin;
 use crate::core::CoreKind;
-use crate::domain::{RuntimeSource, SubscriptionSource};
+use crate::domain::{ChainHop, Protocol, ProxyNode, RuntimeSource, SubscriptionSource};
 use crate::error::{AppError, AppResult};
 use crate::proxy::{create_system_proxy, SystemProxy, SystemProxySnapshot};
 use crate::storage::AppStore;
@@ -76,11 +77,22 @@ pub struct ProxyStatus {
     /// worth calling out rather than leaving silent.
     #[serde(default)]
     pub core_elevated: bool,
+    /// Companion Xray sidecar process is running (sing-box main mode,
+    /// `settings.multi_core_*` delegation). Never true under other cores.
+    #[serde(default)]
+    pub sidecar_running: bool,
 }
 
 /// Cap history to limit RAM (UI only needs recent activity).
 const MAX_REQUEST_HISTORY: usize = 3_000;
 const MAX_LIVE_REMOVAL_HISTORY: usize = 10_000;
+/// Cap the live-connection batch served to the UI. Under TUN the core's
+/// live set is every active connection on the machine (easily thousands ≈
+/// several MB of JSON per poll); `live_connection_batch` serves only the
+/// newest window, aligned with the frontend's MAX_LIVE_ROWS (1000) — its
+/// trim runs after the WebView has already parsed whatever we sent, so the
+/// bound must live here, at the payload source.
+const MAX_LIVE_BATCH_ROWS: usize = 1000;
 
 /// Passive connection-journal stats for one outbound tag (smart switch Level 0).
 #[derive(Debug, Clone, Default)]
@@ -120,6 +132,12 @@ impl PassiveNodeStats {
 
 pub struct Runtime {
     pub core: CoreManager,
+    /// Companion Xray sidecar process (sing-box main mode + delegation
+    /// settings). Independent `CoreManager` instance — the struct has no
+    /// static state, so a second one just owns a second child process.
+    pub sidecar: CoreManager,
+    /// Ports the sidecar currently owns (per-node loopback inbounds).
+    sidecar_ports: Vec<u16>,
     pub system_proxy_on: bool,
     pub proxy_snapshot: Option<SystemProxySnapshot>,
     pub api: Option<ClashApi>,
@@ -182,12 +200,14 @@ pub fn resolve_pending_elevation(
 ) -> Option<PathBuf> {
     let (kind, tun_enabled) = match store.settings.runtime_source() {
         RuntimeSource::Singbox { id } => {
-            let content = store.subscriptions.iter().find(|s| s.id == id).and_then(
-                |s| match &s.source {
+            let content = store
+                .subscriptions
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| match &s.source {
                     SubscriptionSource::Singbox { content } => Some(content.clone()),
                     _ => None,
-                },
-            )?;
+                })?;
             let insight = inspect_singbox_config(&content);
             (CoreKind::SingBox, insight.has_tun)
         }
@@ -231,6 +251,8 @@ impl Runtime {
     pub fn new() -> Self {
         Self {
             core: CoreManager::default(),
+            sidecar: CoreManager::default(),
+            sidecar_ports: Vec::new(),
             system_proxy_on: false,
             proxy_snapshot: None,
             api: None,
@@ -268,8 +290,44 @@ impl Runtime {
         self.xray_metrics.clone()
     }
 
+    /// Tail of the log file for a specific core kind. Under multi-core mode
+    /// the two cores write to separate hourly files — the sidecar manager
+    /// owns the companion's file, the main manager everyone else's. Whichever
+    /// manager actually ran (or is running) the requested kind answers.
+    pub fn core_log_tail_for(
+        &self,
+        kind: CoreKind,
+        limit: usize,
+    ) -> Option<(PathBuf, Vec<String>)> {
+        if self.sidecar.kind() == kind {
+            if let Some(tail) = self.sidecar.core_log_tail(limit) {
+                return Some(tail);
+            }
+        }
+        if self.core.kind() == kind {
+            return self.core.core_log_tail(limit);
+        }
+        None
+    }
+
+    /// Truncate the current-hour log file of the given core kind (same
+    /// manager resolution as [`Self::core_log_tail_for`]). No-op when that
+    /// core never ran in this app instance.
+    pub fn core_log_clear_for(&self, kind: CoreKind) -> AppResult<()> {
+        if self.sidecar.kind() == kind {
+            if self.sidecar.latest_log_path().is_some() {
+                return self.sidecar.clear_log();
+            }
+        }
+        if self.core.kind() == kind {
+            return self.core.clear_log();
+        }
+        Ok(())
+    }
+
     pub fn status(&mut self, store: &AppStore) -> ProxyStatus {
         self.core.poll();
+        self.sidecar.poll();
         // Core may have exited outside stop_proxy — keep uptime field consistent.
         if !self.core.is_running() {
             self.core_started_at = None;
@@ -348,6 +406,10 @@ impl Runtime {
                 store.settings.core_type.clone()
             },
             core_elevated,
+            // The sidecar is only meaningful while the main core runs; a
+            // stopped main core always reports it down regardless of a
+            // lingering process (stop paths tear it down first anyway).
+            sidecar_running: self.core.is_running() && self.sidecar.is_running(),
         }
     }
 
@@ -625,23 +687,25 @@ impl Runtime {
         let full = since_revision.is_none_or(|since| since < self.live_diff_floor);
         let since = since_revision.unwrap_or(0);
         let tag_info = node_tag_info_map(store);
+        // Newest-wins tail window (see MAX_LIVE_BATCH_ROWS): under TUN the
+        // core's live set is every active connection on the machine, and the
+        // frontend's own trim only runs after the WebView has received and
+        // JSON-parsed the whole payload.
+        let skip = self
+            .live_connections
+            .len()
+            .saturating_sub(MAX_LIVE_BATCH_ROWS);
+        let tail = self.live_connections.iter().skip(skip);
         // Order payload is O(N); skip it when the client's order revision is
         // current — pure traffic-counter deltas then merge in place on the
         // client without rebuilding the whole array.
         let order_ids = if full || last_order_revision != Some(self.live_order_revision) {
-            Some(
-                self.live_connections
-                    .iter()
-                    .map(connection_history_key)
-                    .collect::<Vec<_>>(),
-            )
+            Some(tail.clone().map(connection_history_key).collect::<Vec<_>>())
         } else {
             None
         };
         LiveConnectionBatch {
-            rows: self
-                .live_connections
-                .iter()
+            rows: tail
                 .filter(|connection| {
                     full || self
                         .live_item_revisions
@@ -765,6 +829,38 @@ impl Runtime {
         self.api_clone()
     }
 
+    /// Startup-failure diagnostics shared by all core start paths: prefer the
+    /// manager's captured error tail, else the last 1200 chars of the core's
+    /// own log file (NULs stripped). Empty when the core said nothing.
+    fn core_startup_log_hint(&self) -> String {
+        self.core
+            .last_error()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                self.core
+                    .log_path()
+                    .and_then(|log| std::fs::read(log).ok())
+                    .and_then(|b| {
+                        let s = String::from_utf8_lossy(&b);
+                        let tail: String = s
+                            .chars()
+                            .rev()
+                            .take(1200)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        let cleaned = tail.replace('\0', "");
+                        if cleaned.trim().is_empty() {
+                            None
+                        } else {
+                            Some(cleaned)
+                        }
+                    })
+            })
+            .unwrap_or_default()
+    }
+
     /// Generate config, start the active core, optionally enable system proxy.
     pub fn start_proxy(
         &mut self,
@@ -822,16 +918,47 @@ impl Runtime {
             ));
         }
 
+        // Xray sidecar delegation (sing-box main mode only). Resolved before
+        // any build work: the generated sing-box config embeds socks
+        // outbounds pointing at the sidecar ports, so a missing Xray binary
+        // must fail the start up front rather than half-start into
+        // references to a process that will never exist.
+        //
+        // Port occupancy is NOT probed per port here — with hundreds of
+        // delegated nodes that would spawn hundreds of lsof/netstat child
+        // processes. Known ports (mixed/api/extra/diag) are already excluded
+        // at plan time; anything else on a sidecar port is cleared by the
+        // standard `ensure_ports_free` inside `start_with_ports`, and a real
+        // bind conflict surfaces as the sidecar's own FATAL → full rollback.
+        let sidecar_plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes);
+        if sidecar_plan.is_some() {
+            let (xbin, _) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::Xray);
+            if xbin.is_none() {
+                return Err(AppError::Core(
+                    "Xray 副进程已启用但未找到 Xray 内核：请先在设置中下载 Xray，或关闭协议委托"
+                        .into(),
+                ));
+            }
+        }
+
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -843,7 +970,9 @@ impl Runtime {
         // clear it when the user has the secret toggle off (see
         // resolve_clash_api_secret / api_secret_enabled).
         let secret = resolve_clash_api_secret(store);
-        let built = build_singbox_config(&nodes, &build_options(store, secret.clone()))?;
+        let mut opts = build_options(store, secret.clone());
+        opts.sidecar = sidecar_plan.clone();
+        let built = build_singbox_config(&nodes, &opts)?;
         let config_path = write_active_config(app_data_dir, &built)?;
         if store.settings.current_node_id.is_none() {
             if let Some(first) = nodes.first() {
@@ -883,10 +1012,17 @@ impl Runtime {
         };
         let wait_started = Instant::now();
         let mut ok = false;
+        let mut api_seen_ok = false;
         while wait_started.elapsed() < max_wait {
             if api.health_ok() {
-                ok = true;
-                break;
+                api_seen_ok = true;
+                // The control API responding is not enough to claim success —
+                // the mixed inbound must accept connections too (a core whose
+                // inbound never bound would otherwise be reported running).
+                if dial_mixed_ok(store.settings.mixed_port) {
+                    ok = true;
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
             self.core.poll();
@@ -895,49 +1031,36 @@ impl Runtime {
             }
         }
         if !ok {
-            let log_hint = self
-                .core
-                .last_error()
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    self.core
-                        .log_path()
-                        .and_then(|log| std::fs::read(log).ok())
-                        .and_then(|b| {
-                            let s = String::from_utf8_lossy(&b);
-                            let tail: String = s
-                                .chars()
-                                .rev()
-                                .take(1200)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
-                            let cleaned = tail.replace('\0', "");
-                            if cleaned.trim().is_empty() {
-                                None
-                            } else {
-                                Some(cleaned)
-                            }
-                        })
-                })
-                .unwrap_or_default();
+            let log_hint = self.core_startup_log_hint();
             let _ = self.core.stop();
+            let what = crate::core::manager::map_core_startup_hint(&readiness_failure_detail(
+                "sing-box",
+                api_seen_ok,
+                store.settings.mixed_port,
+                store.settings.api_port,
+            ));
             let detail = if log_hint.is_empty() {
-                format!(
-                    "sing-box started but clash_api not responding at 127.0.0.1:{}",
-                    store.settings.api_port
-                )
+                what
             } else {
-                format!(
-                    "sing-box started but clash_api not responding at 127.0.0.1:{}\n--- log ---\n{log_hint}",
-                    store.settings.api_port
-                )
+                format!("{what}\n--- log ---\n{log_hint}")
             };
             return Err(AppError::Core(detail));
         }
         self.api = Some(api);
         self.core_started_at = Some(now_unix_secs());
+
+        // Main core healthy — now bring up the companion Xray sidecar (if
+        // delegated). Failure fails the whole start and rolls the main core
+        // back: its outbounds already point at the sidecar ports, so
+        // leaving it running would black-hole delegated nodes.
+        if let Some(plan) = &sidecar_plan {
+            if let Err(e) = self.start_xray_sidecar(app_data_dir, resource_dir, &nodes, plan) {
+                let _ = self.core.stop();
+                self.core_started_at = None;
+                self.api = None;
+                return Err(e);
+            }
+        }
 
         // System proxy is independent — optional on start; prefer UI switch after running.
         if enable_system_proxy {
@@ -949,6 +1072,76 @@ impl Runtime {
         }
 
         Ok(self.status(store))
+    }
+
+    /// Build, write and start the companion Xray sidecar process for the
+    /// delegation plan. Called only after the main sing-box core is healthy.
+    ///
+    /// `start_with_ports` itself waits until the first sidecar port is
+    /// listening (and errors if the process dies), so a successful return
+    /// means every delegated node's inbound is live. Config validation runs
+    /// via Xray's own `-test` (`CoreKind::check_command_args`); the sidecar
+    /// config deliberately contains no geodata references, so the test never
+    /// needs the geosite/geoip assets.
+    fn start_xray_sidecar(
+        &mut self,
+        app_data_dir: &Path,
+        resource_dir: Option<&Path>,
+        nodes: &[ProxyNode],
+        plan: &SidecarPlan,
+    ) -> AppResult<()> {
+        let entries: Vec<(ProxyNode, u16)> = plan
+            .ports
+            .iter()
+            .filter_map(|(id, port)| {
+                nodes
+                    .iter()
+                    .find(|n| &n.id == id)
+                    .map(|n| (n.clone(), *port))
+            })
+            .collect();
+        let built = build_xray_sidecar_config(&entries)?;
+        let config_path = write_xray_sidecar_config(app_data_dir, &built)?;
+        let (bin, _src) = resolve_core_bin(app_data_dir, resource_dir, CoreKind::Xray);
+        let bin = bin.ok_or_else(|| AppError::Core("Xray sidecar binary not found".into()))?;
+        let log_dir = app_data_dir.join("logs");
+
+        let mut ports = plan.port_list();
+        let first = ports.remove(0);
+        // No elevated path: the sidecar only binds loopback socks ports.
+        if let Err(e) = self.sidecar.start_with_ports(
+            CoreKind::Xray,
+            &bin,
+            &config_path,
+            &log_dir,
+            first,
+            None,
+            &ports,
+            false,
+            resource_dir,
+        ) {
+            let _ = self.sidecar.stop();
+            let hint = self.sidecar.last_error().unwrap_or_default();
+            return Err(AppError::Core(format!(
+                "Xray 副进程启动失败：{e}{}",
+                if hint.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{hint}")
+                }
+            )));
+        }
+        self.sidecar_ports = plan.port_list();
+        crate::app_log::info(
+            "xray_sidecar",
+            format!(
+                "Xray 副进程已启动：{} 个委托节点，端口 {}..={}",
+                plan.ports.len(),
+                self.sidecar_ports.first().copied().unwrap_or(0),
+                self.sidecar_ports.last().copied().unwrap_or(0),
+            ),
+        );
+        Ok(())
     }
 
     /// Generate an Xray config and start the Xray core. Mirrors the sing-box
@@ -1006,14 +1199,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Metrics")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1083,20 +1284,61 @@ impl Runtime {
         self.last_binary_path = Some(bin.clone());
         self.api = None;
         let metrics = XrayMetrics::new("127.0.0.1", store.settings.api_port);
-        // Confirm the metrics module is serving; a miss doesn't fail the
-        // start (proxying works without stats) but gets logged for diagnosis.
+        // Readiness = the mixed inbound accepting connections (Xray has no
+        // selector/hot-switch API to lean on and nothing else proves user
+        // traffic has somewhere to go). The metrics module is probed on the
+        // same loop but a miss only degrades traffic stats, never the start.
+        // TUN start can take a few seconds — same window as the other cores.
+        let max_wait = if elevated {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(6)
+        };
         let wait_started = Instant::now();
         let mut metrics_ok = false;
-        while wait_started.elapsed() < Duration::from_secs(3) {
-            if metrics.health_ok() {
+        let mut listening = false;
+        let mut died_during_wait = false;
+        while wait_started.elapsed() < max_wait {
+            if !metrics_ok && metrics.health_ok() {
                 metrics_ok = true;
+            }
+            if dial_mixed_ok(store.settings.mixed_port) {
+                listening = true;
                 break;
             }
             self.core.poll();
             if !self.core.is_running() {
+                died_during_wait = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(150));
+        }
+        if died_during_wait {
+            // Mirrors the sing-box/mihomo health-wait failure path: the core
+            // died after `wait_until_ready` accepted it — surface its log tail
+            // instead of reporting a successful start the watchdog must undo.
+            let log_hint = self.core_startup_log_hint();
+            let _ = self.core.stop();
+            let detail = if log_hint.is_empty() {
+                "xray exited during startup".to_string()
+            } else {
+                format!("xray exited during startup\n--- log ---\n{log_hint}")
+            };
+            return Err(AppError::Core(detail));
+        }
+        if !listening {
+            let log_hint = self.core_startup_log_hint();
+            let _ = self.core.stop();
+            let what = crate::core::manager::map_core_startup_hint(&format!(
+                "xray started but the mixed inbound never listened at 127.0.0.1:{}（代理端口不可用），已停止内核",
+                store.settings.mixed_port
+            ));
+            let detail = if log_hint.is_empty() {
+                what
+            } else {
+                format!("{what}\n--- log ---\n{log_hint}")
+            };
+            return Err(AppError::Core(detail));
         }
         if !metrics_ok {
             crate::app_log::warn(
@@ -1173,14 +1415,22 @@ impl Runtime {
 
         ensure_listen_port_available_on(
             store.settings.mixed_port,
-            if store.settings.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+            if store.settings.allow_lan {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            },
             "Mixed",
         )?;
         ensure_listen_port_available(store.settings.api_port, "Clash API")?;
         for inb in &store.settings.extra_inbounds {
             ensure_listen_port_available_on(
                 inb.port,
-                if inb.allow_lan { "0.0.0.0" } else { "127.0.0.1" },
+                if inb.allow_lan {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
                 "Inbound",
             )?;
         }
@@ -1248,10 +1498,16 @@ impl Runtime {
         };
         let wait_started = Instant::now();
         let mut ok = false;
+        let mut api_seen_ok = false;
         while wait_started.elapsed() < max_wait {
             if api.health_ok() {
-                ok = true;
-                break;
+                api_seen_ok = true;
+                // Same gate as sing-box: report running only once the mixed
+                // inbound actually accepts connections.
+                if dial_mixed_ok(store.settings.mixed_port) {
+                    ok = true;
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
             self.core.poll();
@@ -1260,44 +1516,18 @@ impl Runtime {
             }
         }
         if !ok {
-            let log_hint = self
-                .core
-                .last_error()
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    self.core
-                        .log_path()
-                        .and_then(|log| std::fs::read(log).ok())
-                        .and_then(|b| {
-                            let s = String::from_utf8_lossy(&b);
-                            let tail: String = s
-                                .chars()
-                                .rev()
-                                .take(1200)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
-                            let cleaned = tail.replace('\0', "");
-                            if cleaned.trim().is_empty() {
-                                None
-                            } else {
-                                Some(cleaned)
-                            }
-                        })
-                })
-                .unwrap_or_default();
+            let log_hint = self.core_startup_log_hint();
             let _ = self.core.stop();
+            let what = crate::core::manager::map_core_startup_hint(&readiness_failure_detail(
+                "mihomo",
+                api_seen_ok,
+                store.settings.mixed_port,
+                store.settings.api_port,
+            ));
             let detail = if log_hint.is_empty() {
-                format!(
-                    "mihomo started but clash api not responding at 127.0.0.1:{}",
-                    store.settings.api_port
-                )
+                what
             } else {
-                format!(
-                    "mihomo started but clash api not responding at 127.0.0.1:{}\n--- log ---\n{log_hint}",
-                    store.settings.api_port
-                )
+                format!("{what}\n--- log ---\n{log_hint}")
             };
             return Err(AppError::Core(detail));
         }
@@ -1388,10 +1618,16 @@ impl Runtime {
                 }
             }
             if !ok {
+                let log_hint = self.core_startup_log_hint();
                 let _ = self.core.stop();
-                return Err(AppError::Core(format!(
-                    "sing-box started but clash_api not responding at {host}:{port}"
-                )));
+                let detail = if log_hint.is_empty() {
+                    format!("sing-box started but clash_api not responding at {host}:{port}")
+                } else {
+                    format!(
+                        "sing-box started but clash_api not responding at {host}:{port}\n--- log ---\n{log_hint}"
+                    )
+                };
+                return Err(AppError::Core(detail));
             }
             self.api = Some(api);
             store.settings.clash_api_secret = if secret.is_empty() {
@@ -1412,7 +1648,7 @@ impl Runtime {
                 std::thread::sleep(Duration::from_millis(100));
             }
             if !ok {
-                let log_hint = self.core.last_error().unwrap_or_default();
+                let log_hint = self.core_startup_log_hint();
                 return Err(AppError::Core(format!(
                     "sing-box failed to stay running{hint}",
                     hint = if log_hint.is_empty() {
@@ -1495,6 +1731,17 @@ impl Runtime {
         if let Some(metrics) = self.xray_metrics.take() {
             metrics.deactivate();
         }
+        // Sidecar first: the main core's delegated outbounds point at its
+        // ports, so tear the dependent process down before the ingress.
+        // Soft-fail — a sticky sidecar must not block stopping the proxy;
+        // the next start's begin-with-stop cleans it up again.
+        if self.sidecar.is_running() || self.sidecar.state() != CoreState::Stopped {
+            if let Err(e) = self.sidecar.stop() {
+                crate::app_log::warn("xray_sidecar", format!("sidecar stop: {e}"));
+            }
+            self.sidecar.await_owned_ports_released();
+        }
+        self.sidecar_ports.clear();
         self.core.stop()?;
         // `CoreManager::stop` waits for the process we actually own. Never
         // force-kill arbitrary listeners here: an empty/test runtime has no
@@ -1567,6 +1814,8 @@ impl Runtime {
             metrics.deactivate();
         }
         self.core.force_shutdown();
+        self.sidecar.force_shutdown();
+        self.sidecar_ports.clear();
         self.clear_live_connections();
         self.traffic_prev = None;
         self.traffic_speed = (0, 0);
@@ -1601,6 +1850,38 @@ fn ensure_listen_port_available_on(port: u16, host: &str, label: &str) -> AppRes
     Ok(())
 }
 
+/// True once the local mixed inbound actually accepts TCP connections.
+/// Complements the Clash-API/metrics health probes: a core that exited (or
+/// never bound its inbound — e.g. TUN creation denied) fails those too, but
+/// readiness claims must not rest on the control port alone. This dial is
+/// what "running" ultimately promises the user: their apps can connect.
+fn dial_mixed_ok(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(350),
+    )
+    .is_ok()
+}
+
+/// Failure text when the post-spawn readiness window expires. Distinguishes
+/// "control API never answered" (core likely dead or wedged) from "API
+/// answered but the mixed inbound never listened" (alive but user traffic
+/// has nowhere to go) — the exact misleading-running class this window
+/// exists to catch.
+fn readiness_failure_detail(
+    core_label: &str,
+    api_seen_ok: bool,
+    mixed_port: u16,
+    api_port: u16,
+) -> String {
+    if api_seen_ok {
+        format!(
+            "{core_label} 控制接口已应答，但本地代理入站始终未在 127.0.0.1:{mixed_port} 监听（代理端口不可用），已停止内核"
+        )
+    } else {
+        format!("{core_label} started but clash_api not responding at 127.0.0.1:{api_port}")
+    }
+}
 
 /// Shared BuildOptions for both generators (sing-box and Xray). The api
 /// secret is only consumed by the sing-box clash_api; Xray ignores it.
@@ -1629,6 +1910,132 @@ fn build_options(store: &AppStore, api_secret: String) -> BuildOptions {
         block_quic: store.settings.block_quic,
         bypass_lan: store.settings.bypass_lan,
         tun_interface_name: None,
+        sidecar: None,
+    }
+}
+
+/// Delegated nodes per sidecar plan cap this high; the rest stay native.
+/// Not a functional limit — each delegated node costs one sing-box socks
+/// outbound, one Xray inbound/outbound pair and one loopback port, all cheap
+/// — it only guards against pathological stores (five-figure subscriptions)
+/// where config size and startup time would degrade for everyone.
+const SIDECAR_MAX_NODES: usize = 1024;
+
+/// Compute which enabled nodes delegate to the companion Xray sidecar and
+/// which loopback port each one gets. `None` = no sidecar (fully native
+/// sing-box config):
+/// - sidecar disabled in settings, or core_type/runtime_source is not the
+///   generated sing-box path (mihomo/Xray main modes never delegate);
+/// - no enabled node qualifies (protocol not in the delegation set, Xray
+///   can't speak the exact protocol/transport combination, pinned by a
+///   chain hop, WireGuard endpoint, or above [`SIDECAR_MAX_NODES`]).
+///
+/// Nodes dropped from the plan silently fall back to their native sing-box
+/// outbound (they keep the same tag either way), with a warn log each.
+pub(crate) fn compute_sidecar_plan(
+    settings: &crate::domain::AppSettings,
+    chains: &[crate::domain::ProxyChain],
+    nodes: &[ProxyNode],
+) -> Option<SidecarPlan> {
+    if !settings.multi_core_enabled {
+        return None;
+    }
+    if CoreKind::parse(&settings.core_type) != CoreKind::SingBox
+        || settings.runtime_source().is_custom()
+    {
+        return None;
+    }
+    // Only entries pinned to a non-main core delegate. v1 supports exactly
+    // one sidecar target (Xray); future cores slot in here as additional
+    // sidecar processes.
+    let wanted: std::collections::HashSet<&str> = settings
+        .protocol_cores
+        .iter()
+        .filter(|e| e.core == CoreKind::Xray.as_str())
+        .map(|e| e.protocol.as_str())
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    // Chain hop pins keep native semantics (v1): a detour chain that routed
+    // through a loopback socks hop would technically work, but the hop dial
+    // direction gets confusing to reason about and to diagnose.
+    let chain_node_ids: std::collections::HashSet<&str> = chains
+        .iter()
+        .flat_map(|c| c.hops.iter())
+        .filter_map(|h| match h {
+            ChainHop::Node { node_id } => Some(node_id.as_str()),
+            ChainHop::Pool { .. } => None,
+        })
+        .collect();
+
+    let base = settings.sidecar_port;
+    // Ports the main config (or the app) already owns — claiming one would
+    // only surface as a sidecar bind FATAL after the main core is up, so
+    // such nodes stay native instead.
+    let mut reserved: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    reserved.insert(settings.mixed_port);
+    reserved.insert(settings.api_port);
+    reserved.insert(crate::config::DIAG_INBOUND_PORT);
+    for inb in &settings.extra_inbounds {
+        reserved.insert(inb.port);
+    }
+
+    let mut ports: Vec<(String, u16)> = Vec::new();
+    // Sidecar ports are base + i over *candidate* nodes, not delegated ones:
+    // skipping a reserved port must not stall (or shift) the range.
+    let mut next_index: u32 = 0;
+    for node in nodes {
+        // Delegation follows ONLY the user's per-protocol pinning — no
+        // per-transport special cases. Nodes the main core can't serve
+        // natively (e.g. xhttp under sing-box) are filtered at config
+        // generation with a logged reason unless their protocol is pinned
+        // to the sidecar here.
+        if !wanted.contains(node.protocol.as_str()) {
+            continue;
+        }
+        if node.protocol == Protocol::WireGuard {
+            continue;
+        }
+        if chain_node_ids.contains(node.id.as_str()) {
+            continue;
+        }
+        if !CoreKind::Xray.supports_node(node) {
+            crate::app_log::warn(
+                "xray_sidecar",
+                format!("节点「{}」的协议组合 Xray 不支持，保持原生出站", node.name),
+            );
+            continue;
+        }
+        let Some(delta) = u16::try_from(next_index).ok() else {
+            crate::app_log::warn("xray_sidecar", "委托端口超出 u16 范围，提前截断委托计划");
+            break;
+        };
+        let Some(port) = base.checked_add(delta) else {
+            crate::app_log::warn("xray_sidecar", "委托端口超出 u16 范围，提前截断委托计划");
+            break;
+        };
+        next_index += 1;
+        if reserved.contains(&port) {
+            crate::app_log::warn(
+                "xray_sidecar",
+                format!("候选端口 {port} 与主配置监听端口冲突，该节点保持原生出站"),
+            );
+            continue;
+        }
+        ports.push((node.id.clone(), port));
+        if ports.len() >= SIDECAR_MAX_NODES {
+            crate::app_log::warn(
+                "xray_sidecar",
+                format!("委托节点超过 {SIDECAR_MAX_NODES} 个上限，其余保持 sing-box 原生出站"),
+            );
+            break;
+        }
+    }
+    if ports.is_empty() {
+        None
+    } else {
+        Some(SidecarPlan { ports })
     }
 }
 
@@ -1885,6 +2292,195 @@ mod clash_api_secret_tests {
 }
 
 #[cfg(test)]
+mod sidecar_plan_tests {
+    use super::*;
+    use crate::domain::{ProtocolConfig, ProxyChain, TlsConfig, Transport};
+
+    fn node(id: &str, protocol: Protocol) -> ProxyNode {
+        let config = match protocol {
+            Protocol::Vless => ProtocolConfig::Vless {
+                uuid: "uuid-1".into(),
+                flow: None,
+                packet_encoding: "xudp".into(),
+            },
+            _ => ProtocolConfig::Shadowsocks {
+                method: "aes-256-gcm".into(),
+                password: "pw".into(),
+                plugin: None,
+                plugin_opts: None,
+                shadow_tls: None,
+            },
+        };
+        ProxyNode {
+            id: id.into(),
+            name: format!("n-{id}"),
+            protocol,
+            server: "example.com".into(),
+            port: 443,
+            tls: None,
+            transport: None,
+            udp: Some(true),
+            config,
+            source: None,
+            latency_ms: None,
+            latency_at: None,
+        }
+    }
+
+    fn sidecar_store() -> AppStore {
+        let mut store = AppStore::default();
+        store.settings.multi_core_enabled = true;
+        store.settings.protocol_cores = vec![crate::domain::ProtocolCoreItem {
+            protocol: "vless".into(),
+            core: "xray".into(),
+        }];
+        store.settings.sidecar_port = 20890;
+        store
+    }
+
+    #[test]
+    fn disabled_or_non_singbox_core_yields_no_plan() {
+        let mut store = sidecar_store();
+        let nodes = vec![node("n1", Protocol::Vless)];
+        store.settings.multi_core_enabled = false;
+        assert!(compute_sidecar_plan(&store.settings, &store.chains, &nodes).is_none());
+
+        store.settings.multi_core_enabled = true;
+        store.settings.core_type = "xray".into();
+        assert!(compute_sidecar_plan(&store.settings, &store.chains, &nodes).is_none());
+    }
+
+    #[test]
+    fn only_delegated_protocols_get_ports_in_input_order() {
+        let store = sidecar_store();
+        let nodes = vec![
+            node("ss1", Protocol::Shadowsocks),
+            node("vl1", Protocol::Vless),
+            node("vl2", Protocol::Vless),
+        ];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(
+            plan.ports,
+            vec![("vl1".into(), 20890), ("vl2".into(), 20891)]
+        );
+    }
+
+    #[test]
+    fn xray_unsupported_combo_falls_back_to_native() {
+        // REALITY over ws is exactly the combination CoreKind::Xray rejects —
+        // the plan must drop it (native sing-box outbound) rather than emit a
+        // sidecar inbound the Xray config can't map.
+        let store = sidecar_store();
+        let mut n = node("vl", Protocol::Vless);
+        n.tls = Some(TlsConfig {
+            enabled: true,
+            server_name: Some("sni.example.com".into()),
+            insecure: None,
+            alpn: None,
+            utls_fingerprint: None,
+            reality_public_key: Some("pbk".into()),
+            reality_short_id: Some("abcd".into()),
+        });
+        n.transport = Some(Transport::Ws {
+            path: None,
+            headers: None,
+            max_early_data: None,
+        });
+        assert!(compute_sidecar_plan(&store.settings, &store.chains, &[n]).is_none());
+    }
+
+    #[test]
+    fn chain_pinned_nodes_stay_native() {
+        let mut store = sidecar_store();
+        store.chains = vec![ProxyChain::new(
+            "链",
+            vec![
+                ChainHop::Node {
+                    node_id: "vl1".into(),
+                },
+                ChainHop::Node {
+                    node_id: "ss1".into(),
+                },
+            ],
+        )];
+        let nodes = vec![
+            node("ss1", Protocol::Shadowsocks),
+            node("vl1", Protocol::Vless),
+            node("vl2", Protocol::Vless),
+        ];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(plan.ports, vec![("vl2".into(), 20890)]);
+    }
+
+    #[test]
+    fn plan_caps_at_max_nodes() {
+        let store = sidecar_store();
+        let nodes: Vec<ProxyNode> = (0..(SIDECAR_MAX_NODES + 5))
+            .map(|i| node(&format!("n{i}"), Protocol::Vless))
+            .collect();
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(plan.ports.len(), SIDECAR_MAX_NODES);
+    }
+
+    #[test]
+    fn xhttp_nodes_follow_the_protocol_pin_only() {
+        // No per-transport special cases: an xhttp node delegates exactly
+        // when its PROTOCOL is pinned to Xray. vless is pinned here (goes to
+        // the sidecar); shadowsocks is not (stays native — and since
+        // sing-box can't speak xhttp, generation filters that node out).
+        let store = sidecar_store();
+        let mut vl_xhttp = node("vl1", Protocol::Vless);
+        vl_xhttp.transport = Some(crate::domain::Transport::Xhttp {
+            path: None,
+            host: None,
+            mode: None,
+        });
+        let mut ss_xhttp = node("ss1", Protocol::Shadowsocks);
+        ss_xhttp.transport = Some(crate::domain::Transport::Xhttp {
+            path: None,
+            host: None,
+            mode: None,
+        });
+        let nodes = vec![vl_xhttp, ss_xhttp];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(plan.ports, vec![("vl1".into(), 20890)]);
+    }
+
+    #[test]
+    fn reserved_ports_are_skipped_without_stalling_the_range() {
+        // The second candidate port (base+1) collides with the Clash API
+        // port: that node stays native, later nodes keep their own indexes —
+        // the range must not shift, stall, or reuse the reserved port.
+        let mut store = sidecar_store(); // base 20890
+        store.settings.api_port = 20891;
+        store.settings.extra_inbounds = vec![crate::domain::ExtraInbound {
+            id: "x".into(),
+            kind: "mixed".into(),
+            port: 20894,
+            allow_lan: false,
+        }];
+        let nodes = vec![
+            node("vl1", Protocol::Vless),
+            node("vl2", Protocol::Vless),
+            node("vl3", Protocol::Vless),
+            node("vl4", Protocol::Vless),
+            node("vl5", Protocol::Vless),
+        ];
+        let plan = compute_sidecar_plan(&store.settings, &store.chains, &nodes).expect("plan");
+        assert_eq!(
+            plan.ports,
+            vec![
+                ("vl1".into(), 20890),
+                // 20891 = api port → vl2 native
+                ("vl3".into(), 20892),
+                ("vl4".into(), 20893),
+                // 20894 = extra inbound → vl5 native
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
 mod stop_behavior_tests {
     use super::*;
     use crate::proxy::{SystemProxy, SystemProxySnapshot};
@@ -2034,6 +2630,33 @@ mod stop_behavior_tests {
             "status must remain a memory-only operation"
         );
     }
+
+    #[test]
+    fn dial_mixed_ok_reflects_whatever_listens_on_loopback() {
+        // A live listener must dial OK...
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(dial_mixed_ok(port));
+
+        // ...and a free port must not. Reserve one then release it so we
+        // don't race into a port some other process happens to occupy.
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free = probe.local_addr().unwrap().port();
+        drop(probe);
+        assert!(!dial_mixed_ok(free));
+    }
+
+    #[test]
+    fn readiness_failure_detail_distinguishes_api_vs_inbound() {
+        // API never answered → control-plane wording.
+        assert!(readiness_failure_detail("sing-box", false, 2080, 19090)
+            .contains("clash_api not responding at 127.0.0.1:19090"));
+        // API answered but the inbound never listened → the misleading-running
+        // class: the message must name the dead proxy port.
+        let msg = readiness_failure_detail("sing-box", true, 2080, 19090);
+        assert!(msg.contains("127.0.0.1:2080"));
+        assert!(!msg.contains("not responding"));
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -2137,5 +2760,61 @@ mod live_batch_tests {
         assert!(delta3.order_ids.is_some());
         assert_eq!(delta3.order_ids.as_ref().map(Vec::len), Some(2));
         assert!(!delta3.removed_ids.is_empty());
+    }
+
+    #[test]
+    fn live_batch_serves_only_the_newest_window_at_tun_scale() {
+        // Under TUN the live set is every machine connection (thousands).
+        // The served batch must be the newest MAX_LIVE_BATCH_ROWS window —
+        // the WebView must never receive an unbounded payload.
+        let conn = |id: &str, up: u64| ConnectionInfo {
+            id: id.into(),
+            destination: format!("{id}.example:443"),
+            host: format!("{id}.example"),
+            destination_ip: "1.2.3.4".into(),
+            destination_port: "443".into(),
+            network: "tcp".into(),
+            conn_type: String::new(),
+            source: "127.0.0.1:1".into(),
+            process: String::new(),
+            chains: vec![],
+            node: String::new(),
+            rule: String::new(),
+            rule_payload: String::new(),
+            upload: up,
+            download: 0,
+            start: String::new(),
+        };
+
+        let mut runtime = Runtime::new();
+        let store = AppStore::default();
+        let total = MAX_LIVE_BATCH_ROWS + 500;
+        runtime.ingest_connections(
+            (0..total)
+                .map(|i| conn(&format!("c{i:05}"), 0))
+                .collect::<Vec<_>>(),
+        );
+
+        let batch = runtime.live_connection_batch(&store, None, None);
+        assert!(batch.full);
+        assert_eq!(batch.rows.len(), MAX_LIVE_BATCH_ROWS);
+        let ids = batch.order_ids.expect("full batch carries order_ids");
+        assert_eq!(ids.len(), MAX_LIVE_BATCH_ROWS);
+
+        // Newest-wins: the head (oldest) is trimmed off, the tail is intact.
+        let oldest = connection_history_key(&conn("c00000", 0));
+        let newest = connection_history_key(&conn(&format!("c{:05}", total - 1), 0));
+        assert!(!ids.contains(&oldest));
+        assert!(ids.contains(&newest));
+
+        // Row/order consistency: every served row is inside the order window
+        // (the client merges by id against it).
+        for row in &batch.rows {
+            assert!(
+                ids.contains(&row.id),
+                "row {} missing from order_ids",
+                row.id
+            );
+        }
     }
 }

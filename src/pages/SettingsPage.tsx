@@ -18,6 +18,7 @@ import {
   updateSettings,
 } from "../api";
 import { GlassButton } from "../components/GlassButton";
+import { useVisibleInterval } from "../hooks/useVisibleInterval";
 import { SolidSelect } from "../components/SolidSelect";
 import { GlassSeg } from "../components/GlassSeg";
 import { GlassSwitchControl } from "../components/GlassSwitchControl";
@@ -45,9 +46,23 @@ import { ChainPage } from "./ChainPage";
 import { DnsPage } from "./DnsPage";
 import { HostsPage } from "./HostsPage";
 
-type SettingsTab = "app" | "ports" | "rules" | "chain" | "dns" | "hosts" | "core";
+type SettingsTab =
+  | "app"
+  | "ports"
+  | "rules"
+  | "chain"
+  | "multiCore"
+  | "dns"
+  | "hosts"
+  | "core";
 
-const CUSTOM_BLOCKED_TABS = new Set(["rules", "chain", "dns", "hosts"]);
+const CUSTOM_BLOCKED_TABS = new Set([
+  "rules",
+  "chain",
+  "multiCore",
+  "dns",
+  "hosts",
+]);
 
 /** Repository link shown in the bottom-right corner of the settings page. */
 const PROJECT_URL = "https://github.com/zn0wii/satelite-proxy/";
@@ -130,6 +145,8 @@ export function SettingsPage() {
   const [blockQuic, setBlockQuic] = useState(false);
   /** Bypass localhost and LAN segments with built-in direct rules. */
   const [bypassLan, setBypassLan] = useState(true);
+  /** Xray sidecar base port — committed on blur/Enter (see onCommitSidecarPort). */
+  const [sidecarPort, setSidecarPort] = useState("20890");
   /** Extra inbound drafts — applied on card save (needs core restart). */
   const [extra, setExtra] = useState<ExtraInbound[]>([]);
   // Extra-inbound editor modal (add / edit share one form).
@@ -158,6 +175,7 @@ export function SettingsPage() {
   const [coreCheckingKind, setCoreCheckingKind] = useState<CoreKind | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
   const [coreProxyAvailable, setCoreProxyAvailable] = useState(false);
+  const [sidecarRunning, setSidecarRunning] = useState(false);
   const [coreProgress, setCoreProgress] =
     useState<CoreDownloadProgress | null>(null);
 
@@ -199,6 +217,11 @@ export function SettingsPage() {
           id: "chain" as const,
           label: t("settings.tabChain"),
           hint: t("settings.hintChain"),
+        },
+        {
+          id: "multiCore" as const,
+          label: t("settings.tabMultiCore"),
+          hint: t("settings.hintMultiCore"),
         },
         {
           id: "dns" as const,
@@ -280,6 +303,7 @@ export function SettingsPage() {
         setBlockQuic(!!s.block_quic);
         setBypassLan(s.bypass_lan !== false);
         setExtra(s.extra_inbounds ?? []);
+        setSidecarPort(String(s.sidecar_port ?? 20890));
       })
       .catch((e) => setError(typeof e === "string" ? e : String(e)));
     void reloadCore();
@@ -316,12 +340,23 @@ export function SettingsPage() {
     void runAppUpdateCheck(false);
   }, [tab, runAppUpdateCheck]);
 
-  useEffect(() => {
-    if (tab !== "core") return;
-    void getProxyStatus()
-      .then((status) => setCoreProxyAvailable(status.running))
-      .catch(() => setCoreProxyAvailable(false));
-  }, [tab]);
+  // Poll on both the core and multi-core tabs: the multi-core tab's running
+  // pill must follow the debounced restart that enabling the switch triggers
+  // (stop → regenerate → main core health → sidecar spawn takes a few
+  // seconds after the toggle lands).
+  useVisibleInterval(
+    () =>
+      getProxyStatus()
+        .then((status) => {
+          setCoreProxyAvailable(status.running);
+          setSidecarRunning(!!status.sidecar_running);
+        })
+        .catch(() => {
+          setCoreProxyAvailable(false);
+          setSidecarRunning(false);
+        }),
+    tab === "core" || tab === "multiCore" ? 2000 : null,
+  );
 
   // Close the inbound-row ⋮ menu on outside pointer-down / Escape.
   useEffect(() => {
@@ -643,7 +678,7 @@ export function SettingsPage() {
         : null;
     return (
       <div
-        className={`kernel-row${active ? " core-active" : ""}`}
+        className={`card kernel-card${active ? " core-active" : ""}`}
         key={kind}
         title={
           kind === "xray"
@@ -653,7 +688,7 @@ export function SettingsPage() {
               : t("settings.coreHint")
         }
       >
-        <div className="kernel-row-main">
+        <div className="kernel-card-head">
           {/* Monogram tile: cube = sing-box, bolt = Xray, cat head = mihomo. */}
           <div className="ver-mark kernel-mark" aria-hidden>
             <CoreMark kind={kind} />
@@ -661,6 +696,17 @@ export function SettingsPage() {
           <span className="kernel-name">
             {info?.name ?? (kind === "xray" ? "Xray" : kind === "mihomo" ? "mihomo" : "sing-box")}
           </span>
+          {info?.installed ? (
+            !active && (
+              <span className={`pill ${info.source === "bundled" ? "ok" : ""}`}>
+                {info.source === "bundled"
+                  ? t("settings.coreBundled")
+                  : t("settings.coreInstalled")}
+              </span>
+            )
+          ) : (
+            <span className="pill warn">{t("settings.coreMissing")}</span>
+          )}
           {/* Radio-style enable: clicking switches the active core (a
              running core restarts onto the new binary). */}
           <button
@@ -674,25 +720,14 @@ export function SettingsPage() {
           >
             <span className="core-radio-dot" aria-hidden />
           </button>
-          {/* Fixed-width slot on BOTH rows (empty when active) so the pill /
-             platform columns line up between the two cores. */}
-          <span className="kernel-switch-hint muted">
-            {active ? "" : t("settings.coreSwitchHint")}
-          </span>
-          {info?.installed ? (
-            !active && (
-              <span className={`pill ${info.source === "bundled" ? "ok" : ""}`}>
-                {info.source === "bundled"
-                  ? t("settings.coreBundled")
-                  : t("settings.coreInstalled")}
-              </span>
-            )
-          ) : (
-            <span className="pill warn">{t("settings.coreMissing")}</span>
-          )}
-          <span className="kernel-platform muted mono">
-            {info?.platform ?? "…"}
-          </span>
+        </div>
+
+        <div className="kernel-card-platform muted mono">
+          {info?.platform ?? "…"}
+        </div>
+
+        <div className="kernel-card-ver">
+          <span className="stat-label">{t("settings.coreCurrent")}</span>
           <span className="kernel-version mono">
             {info?.version ?? "—"}
             {info?.source === "downloaded" ? (
@@ -701,44 +736,41 @@ export function SettingsPage() {
           </span>
         </div>
 
-        <div className="kernel-row-meta">
-          <span className="kernel-meta-item mono">
+        <div className="kernel-card-meta">
+          <span className="mono">
             {t("settings.coreBundledShort")} {info?.bundled_version ?? "—"}
           </span>
-          <span className="kernel-meta-sep" aria-hidden>
-            ·
-          </span>
-          <span className="kernel-meta-item mono">
+          <span className="mono">
             {t("settings.coreLatestShort")} {info?.latest_version ?? "—"}
           </span>
           {info?.update_available ? (
             <span className="pill warn">{t("settings.coreUpdateAvail")}</span>
           ) : null}
-          <div className="kernel-row-actions">
-            <GlassButton
-              icon="↻"
-              disabled={busy || checking || !info}
-              onClick={() => void onCheckCoreUpdate(kind)}
-            >
-              {checking
-                ? t("settings.coreChecking")
-                : t("settings.coreCheck")}
-            </GlassButton>
-            <GlassButton
-              variant="primary"
-              icon="⤓"
-              disabled={busy || checking}
-              onClick={() => void onDownloadCore(kind)}
-            >
-              {busy
-                ? t("settings.coreDownloading")
-                : info?.source === "downloaded"
-                  ? info.update_available
-                    ? t("settings.coreUpdate")
-                    : t("settings.coreRedownload")
-                  : t("settings.coreDownload")}
-            </GlassButton>
-          </div>
+        </div>
+
+        <div className="kernel-row-actions">
+          <GlassButton
+            icon="↻"
+            disabled={busy || checking || !info}
+            onClick={() => void onCheckCoreUpdate(kind)}
+          >
+            {checking
+              ? t("settings.coreChecking")
+              : t("settings.coreCheck")}
+          </GlassButton>
+          <GlassButton
+            icon="⤓"
+            disabled={busy || checking}
+            onClick={() => void onDownloadCore(kind)}
+          >
+            {busy
+              ? t("settings.coreDownloading")
+              : info?.source === "downloaded"
+                ? info.update_available
+                  ? t("settings.coreUpdate")
+                  : t("settings.coreRedownload")
+                : t("settings.coreDownload")}
+          </GlassButton>
         </div>
 
         {busy && progress && (
@@ -750,7 +782,9 @@ export function SettingsPage() {
                   ? t("settings.corePreparing")
                   : progress.stage === "installing"
                     ? t("settings.coreInstalling")
-                    : t("settings.coreDownloading")}
+                    : progress.stage === "assets"
+                      ? t("settings.coreAssets")
+                      : t("settings.coreDownloading")}
               </span>
               <span className="mono core-download-percent">
                 {progress.percent != null
@@ -819,6 +853,54 @@ export function SettingsPage() {
         /* ignore */
       }
     }
+  }
+
+  /** Protocols a sidecar core can carry (CoreKind=Xray support surface).
+   *  Nodes whose exact transport combo Xray rejects (e.g. REALITY+ws) fall
+   *  back to native sing-box outbounds at build time. */
+  const MULTICORE_PROTOCOLS: { value: string; label: string }[] = [
+    { value: "vmess", label: "VMess" },
+    { value: "vless", label: "VLESS" },
+    { value: "shadowsocks", label: "Shadowsocks" },
+    { value: "trojan", label: "Trojan" },
+    { value: "hysteria2", label: "Hysteria2" },
+    { value: "socks5", label: "SOCKS5" },
+    { value: "http", label: "HTTP" },
+    { value: "wireguard", label: "WireGuard" },
+  ];
+  const delegatedProtocols = new Set(
+    (settings?.protocol_cores ?? [])
+      .filter((e) => e.core === "xray")
+      .map((e) => e.protocol),
+  );
+  /** Multi-core only exists under the sing-box main core; switching cores
+   *  auto-disables it (backend mirrors this in set_core_type). */
+  const multiCoreAvailable = (settings?.core_type ?? "singbox") === "singbox";
+
+  /** Row change in the multi-core table: "auto" removes the delegation
+   *  (protocol follows the main core), anything else pins it. */
+  function onProtocolCoreChange(protocol: string, core: string) {
+    const rest = (settings?.protocol_cores ?? []).filter(
+      (e) => e.protocol !== protocol,
+    );
+    const next =
+      core === "auto" ? rest : [...rest, { protocol, core }];
+    void patchApp({ protocolCores: next });
+  }
+
+  async function onCommitSidecarPort() {
+    const parsed = Number.parseInt(sidecarPort, 10);
+    const current = settings?.sidecar_port ?? 20890;
+    if (
+      !Number.isFinite(parsed) ||
+      parsed <= 0 ||
+      parsed > 65535 ||
+      parsed === current
+    ) {
+      setSidecarPort(String(current));
+      return;
+    }
+    await patchApp({ sidecarPort: parsed });
   }
 
   async function onChangeLocale(next: Locale) {
@@ -899,6 +981,7 @@ export function SettingsPage() {
             ? {
                 rules: t("config.customDisabled"),
                 chain: t("config.customDisabled"),
+                multiCore: t("config.customDisabled"),
                 dns: t("config.customDisabled"),
                 hosts: t("config.customDisabled"),
               }
@@ -910,6 +993,7 @@ export function SettingsPage() {
       {error &&
         visibleTab !== "rules" &&
         visibleTab !== "chain" &&
+        visibleTab !== "multiCore" &&
         visibleTab !== "dns" &&
         visibleTab !== "hosts" && (
         <ErrorModal message={error} onClose={() => setError(null)} />
@@ -924,7 +1008,10 @@ export function SettingsPage() {
               ? " settings-ports-page"
               : ""
         }${
-          visibleTab === "rules" || visibleTab === "chain" || visibleTab === "dns"
+          visibleTab === "rules" ||
+          visibleTab === "chain" ||
+          visibleTab === "multiCore" ||
+          visibleTab === "dns"
             ? " settings-scroll-embed"
             : ""
         }`}
@@ -933,6 +1020,130 @@ export function SettingsPage() {
         {!customRuntime && visibleTab === "rules" && <RulesPage embedded />}
 
         {!customRuntime && visibleTab === "chain" && <ChainPage embedded />}
+
+        {visibleTab === "multiCore" && settings && (
+          <section className="settings-panel" aria-label="Multi-core">
+            <div className="card sidecar-card">
+              <div className="via-proxy-row">
+                <div>
+                  <div className="sys-proxy-title">
+                    {t("settings.multiCore")}
+                    {settings.multi_core_enabled && (
+                      <span
+                        className={`pill sidecar-pill${sidecarRunning ? " ok" : ""}`}
+                      >
+                        {sidecarRunning
+                          ? t("settings.multiCoreRunning")
+                          : t("settings.multiCoreIdle")}
+                      </span>
+                    )}
+                  </div>
+                  <div className="sys-proxy-desc">
+                    {t("settings.multiCoreDesc")}
+                  </div>
+                </div>
+                <GlassSwitchControl
+                  checked={!!settings.multi_core_enabled}
+                  title={t("settings.multiCore")}
+                  disabled={customRuntime || !multiCoreAvailable}
+                  onChange={(v) => void patchApp({ multiCoreEnabled: v })}
+                />
+              </div>
+
+              {!multiCoreAvailable && (
+                <div className="field-hint muted">
+                  {t("settings.multiCoreSingboxOnly")}
+                </div>
+              )}
+
+              {settings.multi_core_enabled && (
+                <div className="sidecar-body">
+                  <div className="table-wrap">
+                    <table className="multicore-table">
+                      <colgroup>
+                        <col />
+                        <col style={{ width: 170 }} />
+                      </colgroup>
+                      <thead>
+                        <tr>
+                          <th>{t("settings.multiCoreProtocolCol")}</th>
+                          <th>{t("settings.multiCoreCoreCol")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {MULTICORE_PROTOCOLS.map((p) => (
+                          <tr key={p.value}>
+                            <td>
+                              <code>{p.label}</code>
+                              {delegatedProtocols.has(p.value) ? (
+                                <span className="pill sidecar-pill sidecar-tag">
+                                  Xray
+                                </span>
+                              ) : null}
+                            </td>
+                            <td>
+                              <SolidSelect
+                                value={
+                                  delegatedProtocols.has(p.value)
+                                    ? "xray"
+                                    : "auto"
+                                }
+                                aria-label={p.label}
+                                disabled={customRuntime}
+                                onChange={(v) =>
+                                  onProtocolCoreChange(p.value, v)
+                                }
+                                options={[
+                                  {
+                                    value: "auto",
+                                    label: t("settings.multiCoreFollowMain"),
+                                  },
+                                  { value: "xray", label: "Xray" },
+                                ]}
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="field-hint muted">
+                    {t("settings.multiCoreTableHint")}
+                  </div>
+                  {delegatedProtocols.size === 0 && (
+                    <div className="field-hint sidecar-warn">
+                      {t("settings.multiCoreNoProtocols")}
+                    </div>
+                  )}
+                  <label className="field field-inline">
+                    <span className="field-inline-row">
+                      <span className="field-inline-label">
+                        {t("settings.multiCorePort")}
+                      </span>
+                      <input
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        inputMode="numeric"
+                        className="mono"
+                        value={sidecarPort}
+                        onChange={(e) => setSidecarPort(e.target.value)}
+                        onBlur={() => void onCommitSidecarPort()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter")
+                            (e.target as HTMLInputElement).blur();
+                        }}
+                      />
+                    </span>
+                    <span className="field-hint muted">
+                      {t("settings.multiCorePortHint")}
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
         {!customRuntime && visibleTab === "dns" && (
           <DnsPage embedded />
         )}
@@ -1499,7 +1710,7 @@ export function SettingsPage() {
       )}
 
       {visibleTab === "core" && (
-        <section className="settings-panel version-split" aria-label="Version">
+        <section className="settings-panel version-v3" aria-label="Version">
           {coreError && (
             <ErrorModal
               message={coreError}
@@ -1507,40 +1718,28 @@ export function SettingsPage() {
             />
           )}
 
-          <div className="version-col">
-            <div className="version-block-title">
-              {t("settings.coreVersionTitle")}
-            </div>
-            <div className="card core-card kernel-list">
-              {renderCoreRow("singbox")}
-              {renderCoreRow("xray")}
-              {renderCoreRow("mihomo")}
-            </div>
+          <div className="version-core-grid">
+            {renderCoreRow("singbox")}
+            {renderCoreRow("xray")}
+            {renderCoreRow("mihomo")}
           </div>
 
-          <div className="version-col">
-            <div className="version-block-title">
-              {t("settings.appVersionTitle")}
-            </div>
-            <div className="card core-card app-card">
-            <div className="ver-hero">
+          <div className="card core-card app-card app-bar">
+            <div className="app-bar-main">
               <div className="ver-mark app-mark" aria-hidden>
                 ◈
               </div>
-              <div className="ver-id">
-                <div className="ver-name">Satelite</div>
-                <div className="ver-sub muted">{t("settings.appTagline")}</div>
+              <div className="app-bar-id">
+                <span className="ver-name">Satelite</span>
+                <span className="ver-sub muted">{t("settings.appTagline")}</span>
               </div>
-              <div className="ver-side">
+              <div className="app-bar-ver">
                 <span className="stat-label">{t("settings.coreCurrent")}</span>
-                <div className="ver-ver mono">{appVersion ?? "…"}</div>
+                <span className="ver-ver mono">{appVersion ?? "…"}</span>
               </div>
-            </div>
-
-            <div className="ver-grid">
-              <div>
+              <div className="app-bar-latest">
                 <span className="stat-label">{t("settings.appLatest")}</span>
-                <div className="mono ver-stat">
+                <span className="mono ver-stat">
                   {appChecking && !appUpdate
                     ? "…"
                     : (appUpdate?.latest_version ?? "—")}
@@ -1551,9 +1750,9 @@ export function SettingsPage() {
                   ) : appUpdate ? (
                     <span className="pill ok">{t("settings.appUpToDate")}</span>
                   ) : null}
-                </div>
+                </span>
               </div>
-              <div className="ver-grid-actions">
+              <div className="app-bar-actions">
                 <GlassButton
                   icon="↻"
                   disabled={appChecking}
@@ -1566,7 +1765,6 @@ export function SettingsPage() {
                 {/* The app has no in-app downloader — "re-download" simply
                    opens the latest GitHub release page in the browser. */}
                 <GlassButton
-                  variant="primary"
                   icon="⤓"
                   onClick={() => void openUrl(RELEASES_URL)}
                 >
@@ -1582,49 +1780,34 @@ export function SettingsPage() {
               />
             )}
 
-            {/* Quiet key/value rows filling the equal-height card: last
-               update check, host platform (the core binary targets it),
-               build stack. */}
-            <div className="app-info-list">
-              <div className="app-info-row">
-                <span className="app-info-label">
-                  {t("settings.appCheckedLabel")}
-                </span>
-                <span className="app-info-value">
-                  {appChecking ? "…" : formatCheckedAt(appUpdate?.checked_at)}
-                </span>
-              </div>
-              <div className="app-info-row">
-                <span className="app-info-label">
-                  {t("settings.appPlatformLabel")}
-                </span>
-                <span className="app-info-value">
-                  {cores.singbox?.platform ?? cores.xray?.platform ?? cores.mihomo?.platform ?? "—"}
-                </span>
-              </div>
-              <div className="app-info-row">
-                <span className="app-info-label">
-                  {t("settings.appStackLabel")}
-                </span>
-                <span className="app-info-value">Tauri · React · Rust</span>
-              </div>
+            {/* Quiet meta strip: last update check, host platform (the core
+               binary targets it), build stack, and the exe path with copy. */}
+            <div className="app-bar-foot">
+              <span className="app-bar-meta">
+                {t("settings.appCheckedLabel")}{" "}
+                {appChecking ? "…" : formatCheckedAt(appUpdate?.checked_at)}
+              </span>
+              <span className="app-bar-meta">
+                {t("settings.appPlatformLabel")}{" "}
+                {cores.singbox?.platform ?? cores.xray?.platform ?? cores.mihomo?.platform ?? "—"}
+              </span>
+              <span className="app-bar-meta">Tauri · React · Rust</span>
+              {appPath && (
+                <>
+                  <code className="kernel-path mono" title={appPath}>
+                    {appPath}
+                  </code>
+                  <GlassButton
+                    iconOnly
+                    icon={copiedPath === appPath ? "✓" : "⧉"}
+                    className="kernel-copy-btn"
+                    title={copiedPath === appPath ? t("common.copied") : t("common.copy")}
+                    aria-label={t("common.copy")}
+                    onClick={() => void onCopyPath(appPath)}
+                  />
+                </>
+              )}
             </div>
-
-            {appPath && (
-              <div className="kernel-row-foot">
-                <code className="kernel-path mono" title={appPath}>
-                  {appPath}
-                </code>
-                <GlassButton
-                  iconOnly
-                  icon={copiedPath === appPath ? "✓" : "⧉"}
-                  className="kernel-copy-btn"
-                  title={copiedPath === appPath ? t("common.copied") : t("common.copy")}
-                  aria-label={t("common.copy")}
-                  onClick={() => void onCopyPath(appPath)}
-                />
-              </div>
-            )}
 
             <div className="ver-links">
               <button
@@ -1715,7 +1898,6 @@ export function SettingsPage() {
               ),
               document.body,
             )}
-          </div>
           </div>
         </section>
       )}
